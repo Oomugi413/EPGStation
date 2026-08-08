@@ -7,7 +7,9 @@ export const get: Operation = async (req, res) => {
     const thumbnailApiModel = container.get<IThumbnailApiModel>('IThumbnailApiModel');
 
     try {
-        const filePath = await thumbnailApiModel.getIdFilePath(parseInt(req.params.thumbnailId, 10));
+        const filePath = await thumbnailApiModel.getIdFilePath(
+            api.parseRequestParamInt(req.params.thumbnailId, 'thumbnailId'),
+        );
 
         if (filePath === null) {
             api.responseError(res, {
@@ -17,8 +19,19 @@ export const get: Operation = async (req, res) => {
         } else {
             api.responseFile(req, res, filePath, 'image/jpeg', false);
         }
-    } catch (err: any) {
-        api.responseServerError(res, err.message);
+    } catch (err: unknown) {
+        // DB には登録されているがファイルが存在しない場合は 404 を返す
+        // (500 を返すとクライアントの代替画像への切り替えと区別が付かず、ログも汚れる)
+        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+            api.responseError(res, {
+                code: 404,
+                message: 'thumbnail is not Found',
+            });
+
+            return;
+        }
+
+        api.responseServerError(res, api.getErrorMessage(err));
     }
 };
 
@@ -55,11 +68,11 @@ export const del: Operation = async (req, res) => {
     const thumbnailApiModel = container.get<IThumbnailApiModel>('IThumbnailApiModel');
 
     try {
-        await thumbnailApiModel.delete(parseInt(req.params.thumbnailId, 10));
+        await thumbnailApiModel.delete(api.parseRequestParamInt(req.params.thumbnailId, 'thumbnailId'));
 
         api.responseJSON(res, 200, { code: 200 });
-    } catch (err: any) {
-        api.responseServerError(res, err.message);
+    } catch (err: unknown) {
+        api.responseServerError(res, api.getErrorMessage(err));
     }
 };
 

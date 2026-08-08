@@ -2,7 +2,7 @@
     <v-dialog v-if="isRemove === false" v-model="dialogModel" max-width="500" scrollable>
         <v-card>
             <div class="pa-4">
-                <div class="subtitle-1">{{ recordedItem.name }}</div>
+                <div class="text-subtitle-1">{{ recordedItem.name }}</div>
                 <div class="body-1 mt-2">video files</div>
                 <div class="d-flex">
                     <v-btn v-for="v in videoFiles" v-on:click="downloadVideo(v.video)" v-bind:key="v.video.id" color="primary" class="ma-1">
@@ -22,7 +22,7 @@
 import container from '@/model/ModelContainer';
 import IRecordedUtil from '@/model/state/recorded/IRecordedUtil';
 import Util from '@/util/Util';
-import { Component, Prop, Vue, Watch } from 'vue-property-decorator';
+import { Component, Prop, Vue, Watch, toNative } from 'vue-facing-decorator';
 import * as apid from '../../../../api';
 
 interface DwonloadVideoFileInfo {
@@ -31,7 +31,7 @@ interface DwonloadVideoFileInfo {
 }
 
 @Component({})
-export default class RecordedDownloadDialog extends Vue {
+class RecordedDownloadDialog extends Vue {
     @Prop({ required: true })
     public recordedItem!: apid.RecordedItem;
 
@@ -87,4 +87,6 @@ export default class RecordedDownloadDialog extends Vue {
         this.$emit('downloadPlayList', video);
     }
 }
+
+export default toNative(RecordedDownloadDialog);
 </script>

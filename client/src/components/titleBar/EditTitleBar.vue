@@ -1,14 +1,17 @@
 <template>
-    <v-app-bar app :color="appBarColor" :clipped-left="navigationState.isClipped">
-        <v-btn icon v-on:click="onClose">
+    <v-app-bar :color="appBarColor">
+        <v-btn icon variant="text" v-on:click="onClose">
             <v-icon>mdi-close</v-icon>
         </v-btn>
         <v-toolbar-title>{{ title }}</v-toolbar-title>
         <v-spacer></v-spacer>
-        <v-btn icon v-on:click="onSelectAll">
+        <v-btn icon variant="text" v-on:click="onSelectAll">
             <v-icon>mdi-select-all</v-icon>
         </v-btn>
-        <v-btn icon v-on:click="onDelete">
+        <v-btn v-if="showEncode === true" icon variant="text" title="エンコード" v-on:click="onEncode">
+            <v-icon>mdi-cog-play</v-icon>
+        </v-btn>
+        <v-btn icon variant="text" v-on:click="onDelete">
             <v-icon>mdi-delete</v-icon>
         </v-btn>
     </v-app-bar>
@@ -16,16 +19,22 @@
 
 <script lang="ts">
 import container from '@/model/ModelContainer';
-import { Component, Prop, Vue, Watch } from 'vue-property-decorator';
+import { Component, Prop, Vue, Watch, toNative } from 'vue-facing-decorator';
 import INavigationState from '../../model/state/navigation/INavigationState';
 
 @Component({})
-export default class EditTitleBar extends Vue {
+class EditTitleBar extends Vue {
     @Prop({ required: true })
     public title!: string;
 
     @Prop({ required: true })
     public isEditMode!: boolean;
+
+    /**
+     * エンコードボタンを表示するか (録画済み画面のみ true)
+     */
+    @Prop({ required: false, default: false })
+    public showEncode!: boolean;
 
     public navigationState: INavigationState = container.get<INavigationState>('INavigationState');
 
@@ -43,8 +52,8 @@ export default class EditTitleBar extends Vue {
     /**
      * title bar の色を返す
      */
-    get appBarColor(): string | null {
-        return this.$vuetify.theme.dark === true ? null : 'white';
+    get appBarColor(): string | undefined {
+        return this.$vuetify.theme.global.current.dark === true ? undefined : 'white';
     }
 
     /**
@@ -63,10 +72,19 @@ export default class EditTitleBar extends Vue {
     }
 
     /**
+     * エンコード
+     */
+    public onEncode(): void {
+        this.$emit('encode');
+    }
+
+    /**
      * 削除
      */
     public onDelete(): void {
         this.$emit('delete');
     }
 }
+
+export default toNative(EditTitleBar);
 </script>

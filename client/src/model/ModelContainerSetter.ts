@@ -2,6 +2,8 @@ import { Container } from 'inversify';
 import ChannelsApiModel from './api/channels/ChannelsApiModel';
 import IChannelsApiModel from './api/channels/IChannelsApiModel';
 import ConfigApiModel from './api/config/ConfigApiModel';
+import ISystemSettingApiModel from './api/config/ISystemSettingApiModel';
+import SystemSettingApiModel from './api/config/SystemSettingApiModel';
 import IConfigApiModel from './api/config/IConfigApiModel';
 import DropLogApiModel from './api/dropLog/DropLogApiModel';
 import IDropLogApiModel from './api/dropLog/IDropLogApiModel';
@@ -10,6 +12,16 @@ import IEncodeApiModel from './api/encode/IEncodeApiModel';
 import IRepositoryModel from './api/IRepositoryModel';
 import IRecordedApiModel from './api/recorded/IRecordedApiModel';
 import RecordedApiModel from './api/recorded/RecordedApiModel';
+import ISeriesApiModel from './api/series/ISeriesApiModel';
+import IAuthApiModel from './api/auth/IAuthApiModel';
+import AuthApiModel from './api/auth/AuthApiModel';
+import IUpdateApiModel from './api/update/IUpdateApiModel';
+import UpdateApiModel from './api/update/UpdateApiModel';
+import SeriesApiModel from './api/series/SeriesApiModel';
+import IRecordedTagApiModel from './api/recordedTag/IRecordedTagApiModel';
+import RecordedTagApiModel from './api/recordedTag/RecordedTagApiModel';
+import ISavedSearchApiModel from './api/savedSearch/ISavedSearchApiModel';
+import SavedSearchApiModel from './api/savedSearch/SavedSearchApiModel';
 import IRecordingApiModel from './api/recording/IRecordingApiModel';
 import RecordingApiModel from './api/recording/RecordingApiModel';
 import RepositoryModel from './api/RepositoryModel';
@@ -19,6 +31,10 @@ import IRuleApiModel from './api/rule/IRuleApiModel';
 import RuleApiModel from './api/rule/RuleApiModel';
 import IScheduleApiModel from './api/schedule/IScheduleApiModel';
 import ScheduleApiModel from './api/schedule/ScheduleApiModel';
+import ILogApiModel from './api/log/ILogApiModel';
+import LogApiModel from './api/log/LogApiModel';
+import IStatusApiModel from './api/status/IStatusApiModel';
+import StatusApiModel from './api/status/StatusApiModel';
 import IStorageApiModel from './api/storage/IStorageApiModel';
 import StorageApiModel from './api/storage/StorageApiModel';
 import IStreamApiModel from './api/streams/IStreamApiModel';
@@ -72,8 +88,6 @@ import RecordedState from './state/recorded/RecordedState';
 import RecordedUtil from './state/recorded/RecordedUtil';
 import IRecordedSearchState from './state/recorded/search/IRecordedSearchState';
 import RecordedSearchState from './state/recorded/search/RecordedSearchState';
-import B24RenderState from './state/recorded/streaming/B24RenderState';
-import IB24RenderState from './state/recorded/streaming/IB24RenderState';
 import IRecordedHLSStreamingVideoState from './state/recorded/streaming/IRecordedHLSStreamingVideoState';
 import IRecordedStreamingVideoState from './state/recorded/streaming/IRecordedStreamingVideoState';
 import RecordedHLSStreamingVideoState from './state/recorded/streaming/RecordedHLSStreamingVideoState';
@@ -95,8 +109,12 @@ import RuleState from './state/rule/RuleState';
 import ScrollPositionState from './state/ScrollPositionState';
 import ISearchState from './state/search/ISearchState';
 import SearchState from './state/search/SearchState';
+import IServerStatusState from './state/serverStatus/IServerStatusState';
+import ServerStatusState from './state/serverStatus/ServerStatusState';
 import ISnackbarState from './state/snackbar/ISnackbarState';
 import SnackbarState from './state/snackbar/SnackbarState';
+import ILogState from './state/log/ILogState';
+import LogState from './state/log/LogState';
 import IStorageState from './state/storage/IStorageState';
 import StorageState from './state/storage/StorageState';
 import AddEncodeSettingStorageModel from './storage/encode/AddEncodeSettingStorageModel';
@@ -116,8 +134,6 @@ import RecordedSelectStreamSettingStorageModel from './storage/recorded/Recorded
 import SendVideoFileSelectHostSettingStorageModel from './storage/recorded/SendVideoFileSelectHostSettingStorageModel';
 import { ISettingStorageModel } from './storage/setting/ISettingStorageModel';
 import SettingStorageModel from './storage/setting/SettingStorageModel';
-import { IVideoPlayerSettingModel } from './storage/video/IVideoPlayerSettingModel';
-import VideoPlayerSettingModel from './storage/video/VideoPlayerSettingModel';
 import StorageOperationModel from './storage/StorageOperationModel';
 import IColorThemeState from '@/model/state/IColorThemeState';
 import ColorThemeState from '@/model/state/ColorThemeState';
@@ -135,6 +151,7 @@ export default (container: Container): void => {
     container.bind<IRepositoryModel>('IRepositoryModel').to(RepositoryModel).inSingletonScope();
 
     container.bind<IConfigApiModel>('IConfigApiModel').to(ConfigApiModel).inSingletonScope();
+    container.bind<ISystemSettingApiModel>('ISystemSettingApiModel').to(SystemSettingApiModel).inSingletonScope();
 
     container.bind<IChannelsApiModel>('IChannelsApiModel').to(ChannelsApiModel).inSingletonScope();
 
@@ -145,6 +162,11 @@ export default (container: Container): void => {
     container.bind<IStreamApiModel>('IStreamApiModel').to(StreamApiModel).inSingletonScope();
 
     container.bind<IRecordedApiModel>('IRecordedApiModel').to(RecordedApiModel).inSingletonScope();
+    container.bind<ISeriesApiModel>('ISeriesApiModel').to(SeriesApiModel).inSingletonScope();
+    container.bind<IUpdateApiModel>('IUpdateApiModel').to(UpdateApiModel).inSingletonScope();
+    container.bind<IAuthApiModel>('IAuthApiModel').to(AuthApiModel).inSingletonScope();
+    container.bind<IRecordedTagApiModel>('IRecordedTagApiModel').to(RecordedTagApiModel).inSingletonScope();
+    container.bind<ISavedSearchApiModel>('ISavedSearchApiModel').to(SavedSearchApiModel).inSingletonScope();
 
     container.bind<IRecordingApiModel>('IRecordingApiModel').to(RecordingApiModel).inSingletonScope();
 
@@ -157,6 +179,10 @@ export default (container: Container): void => {
     container.bind<IDropLogApiModel>('IDropLogApiModel').to(DropLogApiModel).inSingletonScope();
 
     container.bind<IStorageApiModel>('IStorageApiModel').to(StorageApiModel).inSingletonScope();
+
+    container.bind<IStatusApiModel>('IStatusApiModel').to(StatusApiModel).inSingletonScope();
+
+    container.bind<ILogApiModel>('ILogApiModel').to(LogApiModel).inSingletonScope();
 
     container.bind<IVersionApiModel>('IVersionApiModel').to(VersionApiModel).inSingletonScope();
 
@@ -179,8 +205,6 @@ export default (container: Container): void => {
     container.bind<IRecordedSelectStreamSettingStorageModel>('IRecordedSelectStreamSettingStorageModel').to(RecordedSelectStreamSettingStorageModel).inSingletonScope();
 
     container.bind<ISendVideoFileSelectHostSettingStorageModel>('ISendVideoFileSelectHostSettingStorageModel').to(SendVideoFileSelectHostSettingStorageModel).inSingletonScope();
-
-    container.bind<IVideoPlayerSettingModel>('IVideoPlayerSettingModel').to(VideoPlayerSettingModel).inSingletonScope();
 
     container.bind<IServerConfigModel>('IServerConfigModel').to(ServerConfigModel).inSingletonScope();
 
@@ -226,8 +250,6 @@ export default (container: Container): void => {
 
     container.bind<IRecordedDetailSelectStreamState>('IRecordedDetailSelectStreamState').to(RecordedDetailSelectStreamState).inSingletonScope();
 
-    container.bind<IB24RenderState>('IB24RenderState').to(B24RenderState);
-
     container.bind<IRecordedStreamingVideoState>('IRecordedStreamingVideoState').to(RecordedStreamingVideoState).inSingletonScope();
 
     container.bind<IRecordedHLSStreamingVideoState>('IRecordedHLSStreamingVideoState').to(RecordedHLSStreamingVideoState).inSingletonScope();
@@ -242,6 +264,8 @@ export default (container: Container): void => {
 
     container.bind<ISearchState>('ISearchState').to(SearchState).inSingletonScope();
 
+    container.bind<IServerStatusState>('IServerStatusState').to(ServerStatusState).inSingletonScope();
+
     container.bind<IRuleState>('IRuleState').to(RuleState).inSingletonScope();
 
     container.bind<IAddEncodeState>('IAddEncodeState').to(AddEncodeState).inSingletonScope();
@@ -251,6 +275,8 @@ export default (container: Container): void => {
     container.bind<IManualReserveState>('IManualReserveState').to(ManualReserveState).inSingletonScope();
 
     container.bind<IStorageState>('IStorageState').to(StorageState).inSingletonScope();
+
+    container.bind<ILogState>('ILogState').to(LogState).inSingletonScope();
 
     container.bind<IVersionState>('IVersionState').to(VersionState).inSingletonScope();
 

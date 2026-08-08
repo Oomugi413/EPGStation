@@ -1,5 +1,5 @@
 <template>
-    <video ref="video" autoplay playsinline></video>
+    <div ref="container" class="dplayer-wrap"></div>
 </template>
 
 <script lang="ts">
@@ -7,7 +7,10 @@ import BaseVideo from '@/components/video/BaseVideo';
 import container from '@/model/ModelContainer';
 import ISocketIOModel from '@/model/socketio/ISocketIOModel';
 import IRecordedStreamingVideoState from '@/model/state/recorded/streaming/IRecordedStreamingVideoState';
-import { Component, Prop, Watch } from 'vue-property-decorator';
+import DPlayerUtil from '@/util/DPlayerUtil';
+import StreamQualityUtil from '@/util/StreamQualityUtil';
+import { DPlayerType } from 'dplayer';
+import { Component, Prop, toNative } from 'vue-facing-decorator';
 import * as apid from '../../../../api';
 
 interface VideoSrcInfo {
@@ -18,7 +21,7 @@ interface VideoSrcInfo {
 }
 
 @Component({})
-export default class RecordedStreamingVideo extends BaseVideo {
+class RecordedStreamingVideo extends BaseVideo {
     @Prop({ required: true })
     public recordedId!: apid.RecordedId;
 
@@ -31,6 +34,15 @@ export default class RecordedStreamingVideo extends BaseVideo {
     @Prop({ required: true })
     public streamingType!: string;
 
+    @Prop({ default: null })
+    public jikkyoChannelId!: string | null;
+
+    @Prop({ default: null })
+    public jikkyoStartAt!: number | null;
+
+    @Prop({ default: null })
+    public jikkyoEndAt!: number | null;
+
     private videoState = container.get<IRecordedStreamingVideoState>('IRecordedStreamingVideoState');
     private socketIoModel: ISocketIOModel = container.get<ISocketIOModel>('ISocketIOModel');
     private onUpdateStatusCallback = (async (): Promise<void> => {
@@ -42,6 +54,22 @@ export default class RecordedStreamingVideo extends BaseVideo {
     private lastUpdatePauseState: number = 0; // 最後に pauseStateBeforeCurrentTime を更新した時間
     private updateDurationTimerId: ReturnType<typeof setTimeout> | undefined; // 録画中の番組の動画長を更新するためのタイマー
     private setCurrentTimeTimerId: ReturnType<typeof setTimeout> | undefined; // setCurrentTime を大量に呼び出さないようにするためのタイマー
+    private qualityNames: string[] = []; // config の視聴設定名一覧
+    private currentMode: number = 0; // 再生中の視聴設定 (画質切替で更新される)
+
+    /**
+     * 録画再生時のニコニコ実況過去ログ取得情報を返す
+     */
+    protected getJikkyoKakologOption(): { jikkyoChannelId: string; startAt: number; endAt: number } | null {
+        if (this.jikkyoChannelId === null || this.jikkyoStartAt === null || this.jikkyoEndAt === null) {
+            return null;
+        }
+        return {
+            jikkyoChannelId: this.jikkyoChannelId,
+            startAt: this.jikkyoStartAt,
+            endAt: this.jikkyoEndAt,
+        };
+    }
 
     public created(): void {
         // socket.io イベント
@@ -49,10 +77,18 @@ export default class RecordedStreamingVideo extends BaseVideo {
     }
 
     public async mounted(): Promise<void> {
+        this.containerElement = this.$refs.container as HTMLElement;
+
         await this.videoState.clear();
         await this.updateVideoInfo();
+        await this.fetchVideoFileSizeForDataBroadcasting(this.videoFileId);
 
-        super.mounted();
+        // 画質切替用に視聴設定一覧を取得する
+        const videoFileType = this.videoState.getVideoFileType(this.videoFileId);
+        this.qualityNames = videoFileType === null ? [] : StreamQualityUtil.getRecordedModeNames(videoFileType, this.streamingType as StreamQualityUtil.RecordedStreamingType);
+        this.currentMode = StreamQualityUtil.normalizeMode(this.qualityNames, this.mode);
+
+        this.initVideoSetting();
 
         // 録画中の場合は duration が変化するので定期的に timeupdate を発行する
         if (this.videoState.isRecording() === true) {
@@ -78,26 +114,72 @@ export default class RecordedStreamingVideo extends BaseVideo {
         }
     }
 
-    public async beforeDestroy(): Promise<void> {
+    public async beforeUnmount(): Promise<void> {
         // socket.io イベント
         this.socketIoModel.offUpdateState(this.onUpdateStatusCallback);
 
-        super.beforeDestroy();
+        clearInterval(this.updateDurationTimerId);
+        clearTimeout(this.setCurrentTimeTimerId);
+
+        super.beforeUnmount();
     }
 
     /**
      * video 再生初期設定
      */
     protected initVideoSetting(): void {
-        this.setSrc(
-            this.createVideoSrc({
-                videoFileId: this.videoFileId,
-                streamingType: this.streamingType,
-                mode: this.mode,
-                playPosition: this.basePlayPosition,
-            }),
-        );
-        this.load();
+        if (this.containerElement === null) {
+            return;
+        }
+
+        DPlayerUtil.setupGlobals();
+
+        const videoSrc = this.createVideoSrc({
+            videoFileId: this.videoFileId,
+            streamingType: this.streamingType,
+            mode: this.currentMode,
+            playPosition: this.basePlayPosition,
+        });
+
+        // プレイヤー上から画質 (エンコード設定) を切り替えられるよう quality リストを生成する
+        const qualities = StreamQualityUtil.createQualityList(this.qualityNames, videoSrc, 'normal');
+
+        const options: DPlayerType.Options = {
+            container: this.containerElement,
+            autoplay: true,
+            live: false,
+            hotkey: true,
+            video:
+                qualities.length > 0
+                    ? ({
+                          quality: qualities,
+                          defaultQuality: this.currentMode,
+                      } as DPlayerType.Options['video'])
+                    : {
+                          url: videoSrc,
+                          type: 'normal',
+                      },
+        };
+
+        this.createPlayer(options);
+
+        // 画質切替時は現在の再生位置から配信し直す
+        this.setupQualitySwitch({
+            resolveUrl: async mode => {
+                this.basePlayPosition = this.getCurrentTime();
+
+                return this.createVideoSrc({
+                    videoFileId: this.videoFileId,
+                    streamingType: this.streamingType,
+                    mode: mode,
+                    playPosition: this.basePlayPosition,
+                });
+            },
+            resetCurrentTime: true,
+            onSwitched: mode => {
+                this.currentMode = mode;
+            },
+        });
     }
 
     /**
@@ -105,6 +187,21 @@ export default class RecordedStreamingVideo extends BaseVideo {
      */
     private createVideoSrc(info: VideoSrcInfo): string {
         return `./api/streams/recorded/${info.videoFileId}/${info.streamingType}?mode=${info.mode}&ss=${info.playPosition}`;
+    }
+
+    /**
+     * DPlayer のシークバーを動画全体の時間軸で扱う
+     * @return boolean
+     */
+    protected isEnabledVirtualTimeline(): boolean {
+        return true;
+    }
+
+    /**
+     * データ放送 (BML) の接続パラメータ
+     */
+    public getDataBroadcastingParam() {
+        return this.buildRecordedDataBroadcastingParam(this.videoFileId);
     }
 
     /**
@@ -116,6 +213,18 @@ export default class RecordedStreamingVideo extends BaseVideo {
     }
 
     /**
+     * エンコード済みの位置を動画全体の時間軸で返す (秒)
+     * mp4 / webm のストリーミングは尺が不明なためバッファ済みの末尾を使う
+     * @return number
+     */
+    public getEncodedTime(): number {
+        const streamDuration = super.getDuration();
+        const encoded = Math.max(isFinite(streamDuration) === true ? streamDuration : 0, super.getEncodedTime());
+
+        return Math.min(this.basePlayPosition + encoded, this.getDuration());
+    }
+
+    /**
      * 動画の現在再生位置を返す (秒)
      * @return number
      */
@@ -124,7 +233,7 @@ export default class RecordedStreamingVideo extends BaseVideo {
             return this.dummyPlayPosition;
         }
 
-        return this.video === null ? 0 : this.basePlayPosition + super.getCurrentTime();
+        return this.dp === null ? 0 : this.basePlayPosition + super.getCurrentTime();
     }
 
     /**
@@ -132,7 +241,7 @@ export default class RecordedStreamingVideo extends BaseVideo {
      * @param time: number (秒)
      */
     public setCurrentTime(time: number): void {
-        if (this.video === null) {
+        if (this.dp === null) {
             return;
         }
 
@@ -154,27 +263,31 @@ export default class RecordedStreamingVideo extends BaseVideo {
 
         clearTimeout(this.setCurrentTimeTimerId);
         this.setCurrentTimeTimerId = setTimeout(async () => {
-            if (this.video === null) {
+            if (this.dp === null) {
                 return;
             }
 
-            const playbackRate = this.video.playbackRate;
+            const playbackRate = this.dp.video.playbackRate;
 
-            this.unload();
             this.basePlayPosition = time;
             this.onWaiting();
             this.onPause();
-            this.setSrc(
-                this.createVideoSrc({
-                    videoFileId: this.videoFileId,
-                    streamingType: this.streamingType,
-                    mode: this.mode,
-                    playPosition: this.basePlayPosition,
-                }),
-            );
-            this.load();
 
-            this.video.playbackRate = playbackRate;
+            this.dp.switchVideo(
+                {
+                    url: this.createVideoSrc({
+                        videoFileId: this.videoFileId,
+                        streamingType: this.streamingType,
+                        mode: this.currentMode,
+                        playPosition: this.basePlayPosition,
+                    }),
+                    type: 'normal',
+                },
+                false,
+                false,
+            );
+
+            this.dp.video.playbackRate = playbackRate;
             if (this.pauseStateBeforeCurrentTime === true) {
                 this.pause();
             } else {
@@ -186,4 +299,6 @@ export default class RecordedStreamingVideo extends BaseVideo {
         }, 200);
     }
 }
+
+export default toNative(RecordedStreamingVideo);
 </script>

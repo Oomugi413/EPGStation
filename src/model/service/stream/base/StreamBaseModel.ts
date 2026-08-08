@@ -32,7 +32,7 @@ abstract class StreamBaseModel<T> implements IStreamBaseModel<T> {
     constructor(
         @inject('IConfiguration') configure: IConfiguration,
         @inject('ILoggerModel') logger: ILoggerModel,
-        @inject('IEncodeProcessManageModel') processManager: IEncodeProcessManageModel,
+        @inject('IStreamProcessManageModel') processManager: IEncodeProcessManageModel,
         @inject('IHLSFileDeleterModel') fileDeleter: IHLSFileDeleterModel,
         @inject('ISocketIOManageModel') socketIO: ISocketIOManageModel,
     ) {
@@ -239,6 +239,21 @@ abstract class StreamBaseModel<T> implements IStreamBaseModel<T> {
     }
 
     /**
+     * ストリームを有効状態にする
+     * in-memory HLS などファイル監視 (startCheckStreamEnable) を経由しない配信で使用する
+     * @param streamId: apid.StreamId
+     */
+    protected markEnable(streamId: apid.StreamId): void {
+        if (this.isEnableStream === true) {
+            return;
+        }
+
+        this.isEnableStream = true;
+        this.log.stream.info(`enable stream: ${streamId}`);
+        this.socketIO.notifyClient();
+    }
+
+    /**
      * 一定時間内に stream 保持要求が来なかったら停止するようにタイマーをセットする
      */
     protected setStopTimer(): void {
@@ -263,7 +278,13 @@ abstract class StreamBaseModel<T> implements IStreamBaseModel<T> {
 }
 
 namespace StreamBaseModel {
-    export const ENCODE_PROCESS_PRIORITY = 1;
+    // 視聴中の配信 (ライブ・録画済みストリーミング) は、バックグラウンドで行われる
+    // 録画済みファイルのエンコード (EncoderModel.ENCODE_PRIPORITY = 10) よりも優先されるべき、
+    // という考えから設定していた値。
+    // 現在 EncodeProcessManageModel はプリエンプション (kill による枠の奪い合い) を行わないため、
+    // この値と EncoderModel.ENCODE_PRIPORITY の大小関係は実際の比較には使用されない。
+    // 将来的にプリエンプションのようなポリシーを再導入する余地を残すため、値自体は変更していない。
+    export const ENCODE_PROCESS_PRIORITY = 100;
     export const EXIT_EVENT = 'exitEvent';
 }
 

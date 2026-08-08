@@ -1,37 +1,35 @@
 <template>
     <div class="on-ari-select-stream">
         <v-dialog v-if="isRemove === false" v-model="dialogState.isOpen" max-width="400" scrollable>
-            <v-card v-if="dialogState.getChannelItem() !== null">
+            <v-card v-if="channelItem !== null">
                 <div class="pa-4 pb-0">
-                    <div>{{ dialogState.getChannelItem().name }}</div>
+                    <div>{{ channelItem.name }}</div>
                     <div class="d-flex">
                         <v-select
                             v-if="isHiddenStreamTypes === false"
                             :items="dialogState.streamTypes"
                             v-model="dialogState.selectedStreamType"
-                            v-on:change="updateStreamConfig"
+                            v-on:update:model-value="updateStreamConfig"
                             class="guide-time"
                             style="max-width: 120px"
-                            :menu-props="{ auto: true }"
                         ></v-select>
                         <v-select
                             v-if="isHiddenStreamConfig === false"
                             :items="dialogState.streamConfigItems"
                             v-model="dialogState.selectedStreamConfig"
                             class="guide-time"
-                            :menu-props="{ auto: true }"
                         ></v-select>
                     </div>
                     <div class="d-flex">
-                        <v-switch value v-model="dialogState.useURLScheme" v-on:change="updateAllStreamConfig"></v-switch>
-                        <v-list-item-title class="subtitle-1">外部アプリで開く</v-list-item-title>
+                        <v-switch v-model="dialogState.useURLScheme" v-on:update:model-value="updateAllStreamConfig"></v-switch>
+                        <v-list-item-title class="text-subtitle-1">外部アプリで開く</v-list-item-title>
                     </div>
                 </div>
                 <v-card-actions>
-                    <v-btn v-if="!!needsGotoGuideButton === true" color="primary" text v-on:click="gotoGuide">番組表</v-btn>
+                    <v-btn v-if="!!needsGotoGuideButton === true" color="primary" variant="text" v-on:click="gotoGuide">週間番組表</v-btn>
                     <v-spacer></v-spacer>
-                    <v-btn color="primary" text v-on:click="dialogState.isOpen = false">キャンセル</v-btn>
-                    <v-btn color="primary" text v-on:click="view">視聴</v-btn>
+                    <v-btn color="primary" variant="text" v-on:click="dialogState.isOpen = false">キャンセル</v-btn>
+                    <v-btn color="primary" variant="text" v-on:click="view">視聴</v-btn>
                 </v-card-actions>
             </v-card>
         </v-dialog>
@@ -41,17 +39,23 @@
 <script lang="ts">
 import container from '@/model/ModelContainer';
 import ISnackbarState from '@/model/state/snackbar/ISnackbarState';
-import { Component, Prop, Vue, Watch } from 'vue-property-decorator';
-import Mpegts from 'mpegts.js';
+import { Component, Prop, Vue, Watch, toNative } from 'vue-facing-decorator';
+import StreamSupportUtil from '@/util/StreamSupportUtil';
 import IOnAirSelectStreamState from '../../model/state/onair/IOnAirSelectStreamState';
+import GuideRouteUtil from '../../util/GuideRouteUtil';
 import Util from '../../util/Util';
 
 @Component({})
-export default class OnAirSelectStream extends Vue {
+class OnAirSelectStream extends Vue {
     @Prop({ required: false })
     public needsGotoGuideButton: boolean | undefined;
 
     public dialogState: IOnAirSelectStreamState = container.get<IOnAirSelectStreamState>('IOnAirSelectStreamState');
+
+
+    get channelItem(): ReturnType<IOnAirSelectStreamState['getChannelItem']> {
+        return this.dialogState.getChannelItem();
+    }
     public isRemove: boolean = false;
     // ストリーム設定セレクタ再描画用
     public isHiddenStreamTypes: boolean = false;
@@ -59,7 +63,7 @@ export default class OnAirSelectStream extends Vue {
 
     private snackbarState: ISnackbarState = container.get<ISnackbarState>('ISnackbarState');
 
-    public beforeDestroy(): void {
+    public beforeUnmount(): void {
         this.dialogState.close();
     }
 
@@ -95,12 +99,8 @@ export default class OnAirSelectStream extends Vue {
             return;
         }
 
-        const query: any = {
-            channelId: channel.id,
-        };
-        if (typeof this.$route.query.time !== 'undefined') {
-            query.time = this.$route.query.time;
-        }
+        // 単局表示 (8 日分の週間番組表)。表示中の時刻・地域などの条件は引き継ぐ
+        const query = GuideRouteUtil.createQuery(this.$route, { channelId: channel.id, keepTime: true });
 
         this.dialogState.isOpen = false;
         await Util.sleep(300);
@@ -119,10 +119,11 @@ export default class OnAirSelectStream extends Vue {
             this.m2tsViewOnURLScheme();
         } else if (this.dialogState.selectedStreamType === 'M2TS-LL') {
             // 再生に対応しているか?
-            if (Mpegts.isSupported() === false || Mpegts.getFeatureList().mseLivePlayback === false) {
+            const m2tsllSupport = StreamSupportUtil.checkM2TSLLSupport();
+            if (m2tsllSupport.isSupported === false) {
                 this.snackbarState.open({
                     color: 'error',
-                    text: '再生に対応していません',
+                    text: m2tsllSupport.reason ?? '再生に対応していません',
                 });
 
                 return;
@@ -219,4 +220,6 @@ export default class OnAirSelectStream extends Vue {
         }
     }
 }
+
+export default toNative(OnAirSelectStream);
 </script>

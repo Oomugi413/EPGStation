@@ -1,19 +1,25 @@
 <template>
     <v-main>
         <TitleBar title="放映中">
+            <template v-slot:menu>
+                <!-- 系列でまとめた表示は系列局の一覧から選ぶ -->
+                <v-btn icon variant="text" size="small" title="系列局から選ぶ" v-on:click="gotoAffiliations">
+                    <v-icon>mdi-television-classic</v-icon>
+                </v-btn>
+            </template>
             <template v-slot:extension>
                 <v-tabs v-if="isTabView === true && onAirState.getSchedules().length > 0" v-model="onAirState.selectedTab" centered>
-                    <v-tab v-for="item in onAirState.getTabs()" :key="item" :href="`#${item}`">{{ item }}</v-tab>
+                    <v-tab v-for="item in onAirState.getTabs()" :key="item.id" :value="item.id">{{ item.name }}</v-tab>
                 </v-tabs>
             </template>
         </TitleBar>
         <transition name="page">
             <div v-if="onAirState.getSchedules().length > 0">
-                <v-tabs-items v-if="isTabView === true" v-model="onAirState.selectedTab">
-                    <v-tab-item v-for="item in onAirState.getTabs()" :key="item" :value="`${item}`">
-                        <OnAirCard :items="onAirState.getSchedules(item)" :reserveIndex="onAirState.getReserveIndex()"></OnAirCard>
-                    </v-tab-item>
-                </v-tabs-items>
+                <v-window v-if="isTabView === true" v-model="onAirState.selectedTab">
+                    <v-window-item v-for="item in onAirState.getTabs()" :key="item.id" :value="item.id">
+                        <OnAirCard :items="onAirState.getSchedules(item.id)" :reserveIndex="onAirState.getReserveIndex()"></OnAirCard>
+                    </v-window-item>
+                </v-window>
                 <div v-else>
                     <OnAirCard :items="onAirState.getSchedules()" :reserveIndex="onAirState.getReserveIndex()"></OnAirCard>
                 </div>
@@ -37,10 +43,9 @@ import IOnAirState from '@/model/state/onair/IOnAirState';
 import ISnackbarState from '@/model/state/snackbar/ISnackbarState';
 import { ISettingStorageModel, ISettingValue } from '@/model/storage/setting/ISettingStorageModel';
 import Util from '@/util/Util';
-import { Component, Vue, Watch } from 'vue-property-decorator';
-import { Route } from 'vue-router';
+import { Component, Vue, Watch, toNative } from 'vue-facing-decorator';
+import type { RouteLocationNormalized as Route } from 'vue-router';
 
-Component.registerHooks(['beforeRouteUpdate', 'beforeRouteLeave']);
 
 @Component({
     components: {
@@ -50,7 +55,7 @@ Component.registerHooks(['beforeRouteUpdate', 'beforeRouteLeave']);
         ProgramDialog,
     },
 })
-export default class OnAir extends Vue {
+class OnAir extends Vue {
     public onAirState: IOnAirState = container.get<IOnAirState>('IOnAirState');
     private settingValue: ISettingValue = container.get<ISettingStorageModel>('ISettingStorageModel').getSavedValue();
     private scrollState: IScrollPositionState = container.get<IScrollPositionState>('IScrollPositionState');
@@ -66,14 +71,28 @@ export default class OnAir extends Vue {
         return this.settingValue.isOnAirTabListView;
     }
 
+    /**
+     * 系列局の一覧へ移動する (系列を選ぶとその系列の番組表が開く)
+     */
+    public async gotoAffiliations(): Promise<void> {
+        await Util.move(this.$router, { path: '/affiliations' });
+    }
+
+    // EIT[p/f] が流れてきたら放送中一覧を取り直す (どの局でも一覧に影響するため絞り込まない)
+    private onUpdateOnAirProgramCallback = ((): void => {
+        void this.fetchData().catch(() => {});
+    }).bind(this);
+
     public created(): void {
         // socket.io イベント
         this.socketIoModel.onUpdateState(this.onUpdateStatusCallback);
+        this.socketIoModel.onUpdateOnAirProgram(this.onUpdateOnAirProgramCallback);
     }
 
-    public beforeDestroy(): void {
+    public beforeUnmount(): void {
         // socket.io イベント
         this.socketIoModel.offUpdateState(this.onUpdateStatusCallback);
+        this.socketIoModel.offUpdateOnAirProgram(this.onUpdateOnAirProgramCallback);
 
         if (this.updateTimer !== null) {
             clearTimeout(this.updateTimer);
@@ -136,9 +155,11 @@ export default class OnAir extends Vue {
         }, 10 * 1000);
     }
 }
+
+export default toNative(OnAir);
 </script>
 
 <style lang="sass" scoped>
-.theme--dark.v-tabs-items
+.v-theme--dark.v-window
     background-color: transparent !important
 </style>

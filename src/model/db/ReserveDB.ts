@@ -40,7 +40,7 @@ export default class ReserveDB implements IReserveDB {
         let hasError = false;
         try {
             // 削除
-            await queryRunner.manager.delete(Reserve, {});
+            await queryRunner.manager.createQueryBuilder().delete().from(Reserve).execute();
 
             // 挿入処理
             for (const item of items) {
@@ -86,6 +86,24 @@ export default class ReserveDB implements IReserveDB {
             .update(Reserve)
             .set(reserve)
             .where('id = :id', { id: reserve.id });
+        await this.promieRetry.run(() => {
+            return queryBuilder.execute();
+        });
+    }
+
+    /**
+     * EIT[p/f] 追従中 (前番組の延長などで開始待ち) かを更新する
+     * @param reserveId: apid.ReserveId
+     * @param isFollowingSchedule: boolean 追従中か
+     * @return Promise<void>
+     */
+    public async updateFollowingSchedule(reserveId: apid.ReserveId, isFollowingSchedule: boolean): Promise<void> {
+        const connection = await this.op.getConnection();
+        const queryBuilder = connection
+            .createQueryBuilder()
+            .update(Reserve)
+            .set({ isFollowingSchedule: isFollowingSchedule })
+            .where('id = :id', { id: reserveId });
         await this.promieRetry.run(() => {
             return queryBuilder.execute();
         });

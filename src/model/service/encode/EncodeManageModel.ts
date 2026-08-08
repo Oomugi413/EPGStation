@@ -9,6 +9,7 @@ import IExecutionManagementModel from '../../IExecutionManagementModel';
 import ILogger from '../../ILogger';
 import ILoggerModel from '../../ILoggerModel';
 import IEncodeManageModel, { EncodeInfoItem, EncodeQueueInfo, EncodeRecordedIdIndex } from './IEncodeManageModel';
+import IEncodeQueueStoreModel from './IEncodeQueueStoreModel';
 import { EncodeOption, EncoderModelProvider, IEncoderModel } from './IEncoderModel';
 
 @injectable()
@@ -17,10 +18,13 @@ class EncodeManageModel implements IEncodeManageModel {
     private executeManagementModel: IExecutionManagementModel;
     private encoderModelProvider: EncoderModelProvider;
     private encodeEvent: IEncodeEvent;
+    private queueStore: IEncodeQueueStoreModel;
     private concurrentEncodeNum: number;
     private waitQueue: IEncoderModel[] = [];
     private runningQueue: IEncoderModel[] = [];
     private idCnt: number = 1;
+    // プロセス枠不足によるリトライ回数を encodeId 単位で保持する
+    private processShortageRetryCntMap: Map<apid.EncodeId, number> = new Map();
 
     private listener: events.EventEmitter = new events.EventEmitter();
 
@@ -30,14 +34,83 @@ class EncodeManageModel implements IEncodeManageModel {
         @inject('IExecutionManagementModel') executeManagementModel: IExecutionManagementModel,
         @inject('EncoderModelProvider') encoderModelProvider: EncoderModelProvider,
         @inject('IEncodeEvent') encodeEvent: IEncodeEvent,
+        @inject('IEncodeQueueStoreModel') queueStore: IEncodeQueueStoreModel,
     ) {
         this.log = logger.getLogger();
         this.executeManagementModel = executeManagementModel;
         this.concurrentEncodeNum = configure.getConfig().concurrentEncodeNum;
         this.encoderModelProvider = encoderModelProvider;
         this.encodeEvent = encodeEvent;
+        this.queueStore = queueStore;
 
         this.listener.on(EncodeManageModel.NEEDS_CHECK_QUEUE_EVENT, this.checkQueue.bind(this));
+    }
+
+    /**
+     * 保存されているエンコードキューを復元する
+     * Service プロセスの起動時に一度だけ呼び出す
+     *
+     * 実行中だったエンコードはプロセスごと失われているため、待機中として積み直す
+     * @return Promise<void>
+     */
+    public async restore(): Promise<void> {
+        if (this.concurrentEncodeNum <= 0) {
+            return;
+        }
+
+        const stored = await this.queueStore.load();
+        if (stored === null || stored.items.length === 0) {
+            return;
+        }
+
+        for (const option of stored.items) {
+            const encoder = await this.encoderModelProvider();
+            encoder.setOption(option);
+            this.waitQueue.push(encoder);
+
+            // 払い出し済みの encodeId と衝突しないようにカウンタを進める
+            if (option.encodeId >= this.idCnt) {
+                this.idCnt = option.encodeId + 1;
+            }
+        }
+
+        if (stored.idCnt > this.idCnt) {
+            this.idCnt = stored.idCnt;
+        }
+
+        this.log.encode.info(`restore encode queue: ${this.waitQueue.length} items`);
+
+        /**
+         * クライアントへの通知は行わない
+         * restore() は socket.io の初期化前 (Web API 待ち受け開始前) に呼ばれるため、
+         * この時点で通知するとソケット未初期化のエラーになる
+         * (クライアントは接続時に改めてエンコード情報を取得する)
+         */
+        this.emitNeedsCheckQueue();
+    }
+
+    /**
+     * 未完了のエンコード情報 (実行中 + 待機中) をファイルへ保存する
+     * 保存に失敗してもエンコード自体は継続させるため、エラーはログのみとする
+     */
+    private saveQueue(): void {
+        const items: EncodeOption[] = [];
+        for (const encoder of [...this.runningQueue, ...this.waitQueue]) {
+            const option = encoder.getEncodeOption();
+            if (option !== null) {
+                items.push(option);
+            }
+        }
+
+        this.queueStore
+            .save({
+                idCnt: this.idCnt,
+                items: items,
+            })
+            .catch(err => {
+                this.log.encode.error('save encode queue error');
+                this.log.encode.error(err);
+            });
     }
 
     /**
@@ -60,6 +133,7 @@ class EncodeManageModel implements IEncodeManageModel {
 
         // queue に積む
         this.waitQueue.push(encoder);
+        this.saveQueue();
         this.emitNeedsCheckQueue();
 
         this.log.encode.info(`add new encode: ${option.encodeId}`);
@@ -106,9 +180,21 @@ class EncodeManageModel implements IEncodeManageModel {
      */
     private async checkQueue(): Promise<void> {
         // 実行権取得
-        const exeId = await this.executeManagementModel.getExecution(
-            EncodeManageModel.CREATE_ENCODING_PROCESS_PRIPORITY,
-        );
+        // 取得に失敗 (タイムアウト) した場合は queue を放置すると誰もチェックしなくなるため、
+        // 一定時間後に再度チェックを行わせる
+        let exeId: string;
+        try {
+            exeId = await this.executeManagementModel.getExecution(EncodeManageModel.CREATE_ENCODING_PROCESS_PRIPORITY);
+        } catch (err: any) {
+            this.log.encode.error('get execution error at checkQueue');
+            this.log.encode.error(err);
+
+            setTimeout(() => {
+                this.emitNeedsCheckQueue();
+            }, EncodeManageModel.CHECK_QUEUE_RETRY_INTERVAL);
+
+            return;
+        }
 
         // runningQueue がロック中 or 同時エンコード最大数に達している or waitQueue が空の場合はスルー
         if (this.runningQueue.length >= this.concurrentEncodeNum || this.waitQueue.length === 0) {
@@ -141,30 +227,103 @@ class EncodeManageModel implements IEncodeManageModel {
         this.runningQueue.push(encoder);
 
         // エンコード終了時の処理をセット
-        encoder.setOnFinish((isError, outputFilePath) => {
-            this.onFinish(isError, outputFilePath, encodeOption);
-        });
+        // プロセス枠不足によるリトライ時は同一の encoder インスタンスを使い回すため、
+        // 初回起動時 (= リトライ回数を保持していない) のみセットする。
+        // encoder.setOnFinish() は内部で EventEmitter.once を使っており、
+        // 呼び出す度にリスナーが積み増されてしまうため、多重登録を避ける必要がある。
+        if (this.processShortageRetryCntMap.has(encodeOption.encodeId) === false) {
+            encoder.setOnFinish((isError, outputFilePath) => {
+                this.onFinish(isError, outputFilePath, encodeOption);
+            });
+        }
 
         // エンコードプロセス開始
         let needsFinalize = false;
+        let isProcessShortageError = false;
         try {
             await encoder.start();
         } catch (err: any) {
             this.log.encode.error(`create encode process error: ${encoder.getEncodeId()}`);
             this.log.encode.error(err);
 
-            needsFinalize = true;
+            if (typeof err?.message === 'string' && err.message === 'EncodeProcessManageModelCreateError') {
+                // エンコードプロセスの枠不足が原因のエラー
+                // (kill 可能な低優先度のプロセスが見つからなかった場合)
+                // 設定ミスなどの恒久的なエラーではないため、破棄せずリトライする
+                isProcessShortageError = true;
+            } else {
+                needsFinalize = true;
 
-            // エラー通知
-            this.encodeEvent.emitErrorEncode();
+                // エラー通知
+                this.encodeEvent.emitErrorEncode();
+            }
         }
 
         // 実行権開放
         this.executeManagementModel.unLockExecution(exeId);
 
-        if (needsFinalize === true) {
+        if (isProcessShortageError === true) {
+            this.retryEncodeByProcessShortage(encoder, encodeOption);
+        } else if (needsFinalize === true) {
             this.finalize(encodeOption.encodeId);
+        } else {
+            /**
+             * checkQueue は 1 回の呼び出しで 1 件しか起動しないため、
+             * 同時実行枠が複数空いている場合は続けてチェックを行わせる
+             * (これを行わないと空き枠があるのに次のエンコードが開始されず、
+             *  次の終了通知まで待たされてしまう)
+             */
+            this.emitNeedsCheckQueue();
         }
+    }
+
+    /**
+     * プロセス枠不足でエンコード開始に失敗した encoder を waitQueue に戻し、
+     * 一定時間後に再度キューのチェックを行わせる
+     * リトライ回数が上限に達した場合は通常のエラーとして確定させる
+     * @param encoder: IEncoderModel
+     * @param encodeOption: EncodeOption
+     */
+    private retryEncodeByProcessShortage(encoder: IEncoderModel, encodeOption: EncodeOption): void {
+        // runningQueue から取り除く
+        this.runningQueue = this.runningQueue.filter(q => {
+            return q.getEncodeId() !== encodeOption.encodeId;
+        });
+
+        const retryCnt = (this.processShortageRetryCntMap.get(encodeOption.encodeId) || 0) + 1;
+
+        if (retryCnt > EncodeManageModel.MAX_PROCESS_SHORTAGE_RETRY_CNT) {
+            // リトライ上限に達したのでエラーとして確定させる
+            this.log.encode.error(
+                `encode process create error: process slot shortage retry limit exceeded, giving up. encodeId: ${encodeOption.encodeId}`,
+            );
+            this.log.encode.error(`枠不足でリトライ上限に達したため中止: ${encodeOption.encodeId}`);
+
+            this.processShortageRetryCntMap.delete(encodeOption.encodeId);
+
+            // エラー通知
+            this.encodeEvent.emitErrorEncode();
+
+            this.finalize(encodeOption.encodeId);
+
+            return;
+        }
+
+        this.processShortageRetryCntMap.set(encodeOption.encodeId, retryCnt);
+
+        this.log.encode.warn(
+            `encode process create error: 
+            process slot shortage. retry ${retryCnt}/${EncodeManageModel.MAX_PROCESS_SHORTAGE_RETRY_CNT} 
+            after ${EncodeManageModel.PROCESS_SHORTAGE_RETRY_INTERVAL}ms. encodeId: ${encodeOption.encodeId}`,
+        );
+
+        // waitQueue の先頭に戻す (他のジョブに順番を追い越されないようにするため unshift する)
+        this.waitQueue.unshift(encoder);
+
+        // 即時リトライするとプロセス枠が空くまでビジーループになるため、一定時間待ってから再チェックする
+        setTimeout(() => {
+            this.emitNeedsCheckQueue();
+        }, EncodeManageModel.PROCESS_SHORTAGE_RETRY_INTERVAL);
     }
 
     /**
@@ -249,6 +408,12 @@ class EncodeManageModel implements IEncodeManageModel {
             return q.getEncodeId() !== encodeId;
         });
 
+        // プロセス枠不足のリトライ回数情報をクリアする
+        this.processShortageRetryCntMap.delete(encodeId);
+
+        // 完了した分を除いた queue を保存する
+        this.saveQueue();
+
         // 実行権開放
         this.executeManagementModel.unLockExecution(exeId);
 
@@ -273,9 +438,17 @@ class EncodeManageModel implements IEncodeManageModel {
             await runningQueueItem.cancel();
         } else {
             // waitQueue から削除
+            // プロセス枠不足でリトライ待ちの状態で waitQueue に戻されているジョブも
+            // ここで削除されるため、キャンセル後に復活することはない
             this.waitQueue = this.waitQueue.filter(q => {
                 return q.getEncodeId() !== encodeId;
             });
+
+            // プロセス枠不足のリトライ回数情報をクリアする
+            this.processShortageRetryCntMap.delete(encodeId);
+
+            // キャンセルした分を除いた queue を保存する
+            this.saveQueue();
 
             process.nextTick(() => {
                 this.emitNeedsCheckQueue();
@@ -447,6 +620,12 @@ namespace EncodeManageModel {
     export const NEEDS_CHECK_QUEUE_EVENT = 'needsCheckQueue';
     export const ENCODE_PRIPORITY = 10;
     export const DEFAULT_TIMEOUT_RATE = 4.0;
+    // プロセス枠不足でエンコード開始に失敗した際のリトライ間隔 (ms)
+    export const PROCESS_SHORTAGE_RETRY_INTERVAL = 1000 * 30;
+    // プロセス枠不足でエンコード開始に失敗した際の最大リトライ回数
+    export const MAX_PROCESS_SHORTAGE_RETRY_CNT = 5;
+    // 実行権の取得に失敗した際に queue を再チェックするまでの間隔 (ms)
+    export const CHECK_QUEUE_RETRY_INTERVAL = 1000 * 10;
 }
 
 export default EncodeManageModel;

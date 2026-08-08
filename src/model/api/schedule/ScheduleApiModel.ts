@@ -1,7 +1,10 @@
 import { inject, injectable } from 'inversify';
 import * as apid from '../../../../api';
+import { clampUndefinedDuration, isDurationUndefined } from '../../../util/ProgramDuration';
 import Channel from '../../../db/entities/Channel';
 import Program from '../../../db/entities/Program';
+import IBroadcastAffiliation from '../../channel/IBroadcastAffiliation';
+import IBroadcastRegion from '../../channel/IBroadcastRegion';
 import IChannelDB from '../../db/IChannelDB';
 import IProgramDB, { ProgramWithOverlap } from '../../db/IProgramDB';
 import IScheduleApiModel from './IScheduleApiModel';
@@ -10,10 +13,19 @@ import IScheduleApiModel from './IScheduleApiModel';
 export default class ScheduleApiModel implements IScheduleApiModel {
     private channelDB: IChannelDB;
     private programDB: IProgramDB;
+    private broadcastRegion: IBroadcastRegion;
+    private broadcastAffiliation: IBroadcastAffiliation;
 
-    constructor(@inject('IChannelDB') channelDB: IChannelDB, @inject('IProgramDB') programDB: IProgramDB) {
+    constructor(
+        @inject('IChannelDB') channelDB: IChannelDB,
+        @inject('IProgramDB') programDB: IProgramDB,
+        @inject('IBroadcastRegion') broadcastRegion: IBroadcastRegion,
+        @inject('IBroadcastAffiliation') broadcastAffiliation: IBroadcastAffiliation,
+    ) {
         this.channelDB = channelDB;
         this.programDB = programDB;
+        this.broadcastRegion = broadcastRegion;
+        this.broadcastAffiliation = broadcastAffiliation;
     }
 
     /**
@@ -37,6 +49,8 @@ export default class ScheduleApiModel implements IScheduleApiModel {
      * @return Promise<apid.Schedule[]>
      */
     public async getSchedules(option: apid.ScheduleOption): Promise<apid.Schedule[]> {
+        await this.broadcastAffiliation.updateCache();
+
         const types: apid.ChannelType[] = [];
         if (option.GR === true) {
             types.push('GR');
@@ -220,7 +234,8 @@ export default class ScheduleApiModel implements IScheduleApiModel {
 
             result.push({
                 channel: this.toScheduleChannleItem(channel, isHalfWidth),
-                programs: programsIndex[channel.id],
+                // 放送時間未定の番組は暫定の終了時刻を持つため、次の番組に食い込まないよう切り詰める
+                programs: clampUndefinedDuration(programsIndex[channel.id]),
             });
         }
 
@@ -233,6 +248,8 @@ export default class ScheduleApiModel implements IScheduleApiModel {
      * @return Promise<apid.Schedule[]>
      */
     public async getChannelSchedule(option: apid.ChannelScheduleOption): Promise<apid.Schedule[]> {
+        await this.broadcastAffiliation.updateCache();
+
         const channel = await this.channelDB.findId(option.channelId);
         if (channel === null) {
             throw new Error('ChannelIsNotFound');
@@ -273,12 +290,17 @@ export default class ScheduleApiModel implements IScheduleApiModel {
      * @return Promise<apid.Schedule[]>
      */
     public async getBroadcastingSchedule(option: apid.BroadcastingScheduleOption): Promise<apid.Schedule[]> {
+        await this.broadcastAffiliation.updateCache();
+
         const channels = await this.channelDB.findAll(true);
         const programs = await this.programDB.findBroadcasting(option);
 
+        // 次の番組も返す場合は放送中 + 次の 2 件までに切り詰める
+        const programLimit = option.includeNextProgram === true ? 2 : 1;
+
         return this.createSchedule(channels, programs, option.isHalfWidth, true).map(s => {
-            if (s.programs.length > 1) {
-                s.programs = [s.programs[0]];
+            if (s.programs.length > programLimit) {
+                s.programs = s.programs.slice(0, programLimit);
             }
 
             return s;
@@ -327,6 +349,11 @@ export default class ScheduleApiModel implements IScheduleApiModel {
             isFree: program.isFree,
             name: isHalfWidth ? program.halfWidthName : program.name,
         };
+
+        // 放送時間未定の番組は endAt が暫定値であることをクライアントへ伝える
+        if (isDurationUndefined(program.duration) === true) {
+            result.isDurationUndefined = true;
+        }
 
         if (program.description !== null) {
             if (isHalfWidth === true) {
@@ -428,6 +455,26 @@ export default class ScheduleApiModel implements IScheduleApiModel {
 
         if (channel.remoteControlKeyId !== null) {
             result.remoteControlKeyId = channel.remoteControlKeyId;
+        }
+
+        // 地上波系は地域情報を付与する
+        const region = this.broadcastRegion.getRegion({
+            networkId: channel.networkId,
+            serviceId: channel.serviceId,
+            channelType: channel.channelType,
+        });
+        if (region !== null) {
+            result.region = region;
+        }
+
+        // 地上波系は BIT から収集した系列情報を付与する (未受信の局は局名から同梱データで補う)
+        const affiliation = this.broadcastAffiliation.getAffiliation({
+            networkId: channel.networkId,
+            channelType: channel.channelType,
+            name: channel.halfWidthName ?? channel.name,
+        });
+        if (affiliation !== null) {
+            result.affiliation = affiliation;
         }
 
         return result;

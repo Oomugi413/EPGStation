@@ -7,6 +7,39 @@ import ILogger from './ILogger';
 import ILoggerModel from './ILoggerModel';
 
 /**
+ * ログファイルのファイルパスを生成する
+ * @param dir: dir
+ * @param filename: file name
+ * @return file path
+ */
+export const createDefaultLogPath = (dir: string, filename: string): string => {
+    const logFileFullPath = path.join(__dirname, '..', '..', 'logs', dir, filename);
+
+    return process.platform === 'win32' ? logFileFullPath.replace(/\\/g, '\\\\') : logFileFullPath;
+};
+
+/**
+ * ログ設定ファイル内のプレースホルダをログファイルパスへ置換する
+ * @param str: ログ設定ファイルの中身
+ * @return 置換後の文字列
+ */
+export const replaceLogFilePath = (str: string): string => {
+    return str
+        .replace('%OperatorSystem%', createDefaultLogPath('Operator', 'system.log'))
+        .replace('%OperatorAccess%', createDefaultLogPath('Operator', 'access.log'))
+        .replace('%OperatorStream%', createDefaultLogPath('Operator', 'stream.log'))
+        .replace('%OperatorEncode%', createDefaultLogPath('Operator', 'encode.log'))
+        .replace('%ServiceSystem%', createDefaultLogPath('Service', 'system.log'))
+        .replace('%ServiceAccess%', createDefaultLogPath('Service', 'access.log'))
+        .replace('%ServiceStream%', createDefaultLogPath('Service', 'stream.log'))
+        .replace('%ServiceEncode%', createDefaultLogPath('Service', 'encode.log'))
+        .replace('%EPGUpdaterSystem%', createDefaultLogPath('EPGUpdater', 'system.log'))
+        .replace('%EPGUpdaterAccess%', createDefaultLogPath('EPGUpdater', 'access.log'))
+        .replace('%EPGUpdaterStream%', createDefaultLogPath('EPGUpdater', 'stream.log'))
+        .replace('%EPGUpdaterEncode%', createDefaultLogPath('EPGUpdater', 'encode.log'));
+};
+
+/**
  * Logger
  */
 @injectable()
@@ -36,6 +69,19 @@ export default class LoggerModel implements ILoggerModel {
                 },
             });
         } else {
+            // 用意されていない場合は同梱の sample から生成する (config.yml と同じ扱い)
+            LoggerModel.ensureLogConfigFile(filePath);
+
+            if (fs.existsSync(filePath) === false) {
+                // sample も無い場合はコンソール出力で起動を続ける。
+                // ログ設定が無いだけで EPGStation 全体が起動できないのは割に合わない
+                console.error(`log config file is not found: ${filePath}`);
+                console.error('fallback to console logging');
+                this.initialize();
+
+                return;
+            }
+
             try {
                 const str = this.readLogFile(filePath);
                 const config: log4js.Configuration = yaml.load(str) as any;
@@ -53,6 +99,36 @@ export default class LoggerModel implements ILoggerModel {
             stream: log4js.getLogger('stream'),
             encode: log4js.getLogger('encode'),
         };
+    }
+
+    /**
+     * ログ設定ファイルが無ければ同梱の sample (<name>.sample.yml) から生成する。
+     * Operator / Service / EPGUpdater が同時に起動しても競合しないよう、
+     * 排他作成 (COPYFILE_EXCL) を使い EEXIST は正常として扱う
+     * @param filePath: string 生成先のログ設定ファイル
+     */
+    private static ensureLogConfigFile(filePath: string): void {
+        if (fs.existsSync(filePath) === true) {
+            return;
+        }
+
+        const samplePath = filePath.replace(/\.yml$/, '.sample.yml');
+        if (fs.existsSync(samplePath) === false) {
+            return;
+        }
+
+        try {
+            fs.mkdirSync(path.dirname(filePath), { recursive: true });
+            fs.copyFileSync(samplePath, filePath, fs.constants.COPYFILE_EXCL);
+            console.log(`log config file generated at ${filePath} from ${samplePath}.`);
+        } catch (err: any) {
+            if (err?.code === 'EEXIST') {
+                // 他プロセスが先に作成した (正常)
+                return;
+            }
+            console.error(`failed to generate log config file from ${samplePath}`);
+            console.error(err);
+        }
     }
 
     /**
@@ -93,29 +169,6 @@ export default class LoggerModel implements ILoggerModel {
         }
 
         // replace path
-        return str
-            .replace('%OperatorSystem%', this.createDefaultLogPath('Operator', 'system.log'))
-            .replace('%OperatorAccess%', this.createDefaultLogPath('Operator', 'access.log'))
-            .replace('%OperatorStream%', this.createDefaultLogPath('Operator', 'stream.log'))
-            .replace('%OperatorEncode%', this.createDefaultLogPath('Operator', 'encode.log'))
-            .replace('%ServiceSystem%', this.createDefaultLogPath('Service', 'system.log'))
-            .replace('%ServiceAccess%', this.createDefaultLogPath('Service', 'access.log'))
-            .replace('%ServiceStream%', this.createDefaultLogPath('Service', 'stream.log'))
-            .replace('%ServiceEncode%', this.createDefaultLogPath('Service', 'encode.log'))
-            .replace('%EPGUpdaterSystem%', this.createDefaultLogPath('EPGUpdater', 'system.log'))
-            .replace('%EPGUpdaterAccess%', this.createDefaultLogPath('EPGUpdater', 'access.log'))
-            .replace('%EPGUpdaterStream%', this.createDefaultLogPath('EPGUpdater', 'stream.log'))
-            .replace('%EPGUpdaterEncode%', this.createDefaultLogPath('EPGUpdater', 'encode.log'));
-    }
-    /**
-     * ログファイルのファイルパスを生成する
-     * @param dir: dir
-     * @param filename: file name
-     * @return file path
-     */
-    private createDefaultLogPath(dir: string, filename: string): string {
-        const logFileFullPath = path.join(__dirname, '..', '..', 'logs', dir, filename);
-
-        return process.platform === 'win32' ? logFileFullPath.replace(/\\/g, '\\\\') : logFileFullPath;
+        return replaceLogFilePath(str);
     }
 }

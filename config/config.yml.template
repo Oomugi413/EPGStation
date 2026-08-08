@@ -1,5 +1,9 @@
 port: 8888
+# mirakurunPath は unix socket, named pipe (Windows), http, https の URL が指定可能
+# https 例: mirakurunPath: https://mirakurun.example.com
 mirakurunPath: http+unix://%2Fvar%2Frun%2Fmirakurun.sock/
+# mirakurun の API エンドポイントのベースパス (省略時 /api)
+# mirakurunAPIPath: /api
 
 # dbtype: sqlite
 # sqlite:
@@ -21,6 +25,13 @@ needToReplaceEnclosingCharacters: true
 
 epgUpdateIntervalTime: 10
 
+# 過去の番組表データを残す時間 (時間)
+# 0: 終了した番組を順次削除する (既定) / -1: 削除せず無期限に残す
+epgRetentionTime: 0
+
+# 過去の番組表データを削除する間隔 (分)。省略時は epgUpdateIntervalTime と同じ
+#epgDeleteIntervalTime: 60
+
 conflictPriority: 1
 recPriority: 2
 isEnabledDropCheck: true
@@ -31,6 +42,16 @@ recorded:
     - name: recorded
       path: '%ROOT%/recorded'
 
+# 外部録画ファイル (EDCB 等) の取り込みを許可するディレクトリ (featureFlags.externalFileImport: true の場合のみ有効)
+# 未設定 (コメントアウトのまま) だと取り込み機能自体が無効になる
+# importDirs:
+#     - name: edcb
+#       path: '/path/to/edcb/recorded'
+# importDefaultMode: register # register: 元ファイルを移動せず登録のみ行う / move: 録画ディレクトリへ移動する
+# importFileNamePatterns: [] # EDCB ファイル名推定用のカスタム正規表現 (named capture group: year,month,day,hour,min,sec,name,channel)
+# importWatch: false # true にすると importDirs を定期的に監視し新規ファイルを自動取り込みする
+# importWatchIntervalSec: 300
+
 thumbnail: '%ROOT%/thumbnail'
 thumbnailSize: 480x270
 thumbnailPosition: 5
@@ -38,13 +59,93 @@ thumbnailPosition: 5
 ffmpeg: /usr/local/bin/ffmpeg
 ffprobe: /usr/local/bin/ffprobe
 
+# tsreadex の実行ファイルパス (ライブ HLS の cmd で %TSREADEX% を使う場合に指定、省略時は PATH 上の tsreadex)
+# tsreadex: /usr/local/bin/tsreadex
+
+# rigaya 氏製ハードウェアエンコーダの実行ファイルパス (省略時は PATH 上の QSVEncC / NVEncC / VCEEncC)
+# encodePresets の hwaccel に qsvencc / nvencc / vceencc を指定した場合に使われる。
+# config/enc.js には環境変数 QSVENCC / NVENCC / VCEENCC として渡される
+# qsvencc: /usr/local/bin/QSVEncC
+# nvencc: /usr/local/bin/NVEncC
+# vceencc: /usr/local/bin/VCEEncC
+
+# 録画ファイルのバックグラウンドエンコード上限
 encodeProcessNum: 4
+# ライブ視聴・録画再生ストリーミングの上限（encodeProcessNum とは別枠）
+streamProcessNum: 4
 concurrentEncodeNum: 1
+
+# =====================================================================================
+# エンコードプリセット表 (encodePresets) — ハードウェア × コーデック × 画質を一括有効化する
+# =====================================================================================
+# 録画エンコード (encode) とライブ HLS・録画ストリーミング (stream.profiles) を、
+# 「ハードウェア (software / qsv (Intel) / vaapi (AMD) / nvenc (NVIDIA) /
+#   qsvencc / nvencc / vceencc (rigaya 氏製エンコーダ)) ×
+#   コーデック (h264 / hevc) × 画質 (1080p / 720p / 480p / 240p) × 用途」の
+# 組み合わせから自動生成する。1 つずつ手書きしてコメントアウトで管理する代わりに、
+# 使いたい軸をフラグで指定するだけで該当する組み合わせがまとめて有効になる。
+#
+# - hwaccel: 使用するハードウェアアクセラレーション (省略時 software)。
+#     software | qsv | vaapi | nvenc | qsvencc | nvencc | vceencc
+#     software / qsv / vaapi / nvenc は ffmpeg のエンコーダを使う。ffmpeg が対応エンコーダ
+#     (libx264/libx265, h264_qsv/hevc_qsv, h264_vaapi/hevc_vaapi, h264_nvenc/hevc_nvenc) 付きで
+#     ビルドされていること、qsv/vaapi は Linux で /dev/dri へのアクセス権限が必要
+#     (Docker では --device /dev/dri を渡す)、vaapi は /dev/dri/renderD128 固定
+#     qsvencc / nvencc / vceencc は rigaya 氏製の QSVEncC / NVEncC / VCEEncC を使う
+#     (実行ファイルパスは上記の qsvencc / nvencc / vceencc で指定。配信では rigaya 側で
+#      デコード〜エンコードまで行い、ffmpeg へパイプして remux する)
+# - codecs: 有効化するコーデック配列 (省略時 [h264])。hevc は同画質で H.264 の約半分のビットレート
+# - qualities: 有効化する画質配列 (省略時 [1080p, 720p, 480p])
+# - targets: 生成対象 (省略時 [recorded, liveHLS, recordedStreaming])
+#     recorded: 録画ファイルのバックグラウンドエンコード (config/enc.js 経由)
+#     liveHLS: ライブ視聴の HLS 配信 (in-memory 低遅延)
+#     recordedStreaming: 録画再生の mp4 / HLS 配信
+#     (webm は vp9 系のためこのプリセット表の対象外。従来通り stream.profiles に手書きする)
+#
+# 優先順位 (手書き優先): 下記の `encode:` / `stream:` セクションに 1 件でも手書きの設定が
+# あれば、そのセクション単位で encodePresets からの自動生成は行われない
+# (encode 配列全体、stream.profiles.live、stream.profiles.recorded.ts、
+#  stream.profiles.recorded.encoded がそれぞれ独立した単位)。
+#
+# 例: Intel QSV で H.264/HEVC の 1080p/720p を全用途に対して有効化する場合
+# encodePresets:
+#     hwaccel: qsv
+#     codecs: [h264, hevc]
+#     qualities: [1080p, 720p]
+#     targets: [recorded, liveHLS, recordedStreaming]
+
+# 録画ファイルのエンコードプリセット (新形式: id ベース)。
+# encodePresets の targets に recorded を含め、かつこの encode 配列が空の場合は自動生成に委ねられる。
+# 手書きする場合の書式:
+# - id はプリセットの識別子。運用中に name を変更しても id が同じならクライアントの
+#   保存済み設定は無効にならない (録画予約・ルールは name で照合されるため name の変更は注意)。
+# - video / audio はクライアント表示用の参考情報 (実際のエンコード処理は cmd が担う)。
+# - enc.js は引数でエンコーダを切り替えられる:
+#     cmd: '%NODE% %ROOT%/config/enc.js [プリセット] [最大高さ]'
+#     プリセット: h264 (既定) | hevc | h264_nvenc | hevc_nvenc | h264_qsv | hevc_qsv | h264_vaapi | hevc_vaapi
+#                 | qsvencc_h264 | qsvencc_hevc | nvencc_h264 | nvencc_hevc | vceencc_h264 | vceencc_hevc
+#                 (qsvencc_* / nvencc_* / vceencc_* は rigaya 氏製エンコーダを ffmpeg を介さず直接使う)
+#     最大高さ:   出力の最大高さ (省略時 720。0 で元解像度のまま)
 encode:
-    - name: H.264
-      cmd: '%NODE% %ROOT%/config/enc.js'
+    - id: h264-720p
+      name: H.264
+      cmd: '%NODE% %ROOT%/config/enc.js h264 720'
       suffix: .mp4
-      rate: 4.0
+      # タイムアウト倍率 (番組長 × この値でエンコードを打ち切る)。
+      # enc.js の h264 プリセットは画質優先の -preset slow なので実時間の数倍かかる前提にする
+      rate: 10.0
+      video:
+          codec: libx264
+          height: 720
+      audio:
+          codec: aac
+    # =====================================================================
+    # 1080p / HEVC / NVENC / QSV / VAAPI の組み合わせを追加したい場合は、
+    # 上の encode 配列を空にして (この h264-720p も削除して) ファイル先頭の
+    # encodePresets を有効化するのが手軽 (例: hwaccel: nvenc, codecs: [h264, hevc],
+    # qualities: [1080p, 720p])。個別に手書きしたい場合のみ、この配列に id ベースで
+    # 追記する (書式は上のコメントと config/enc.js の PRESETS 定義を参照)。
+    # =====================================================================
 
 urlscheme:
     m2ts:
@@ -56,239 +157,799 @@ urlscheme:
     download:
         ios: vlc-x-callback://x-callback-url/download?url=PROTOCOL%3A%2F%2FADDRESS&filename=FILENAME
 
+# 視聴用ストリーミング設定 (新形式: stream.profiles / id ベース)。旧形式 (stream.live / stream.recorded) から全面移行済み。
+# - cmd を省略した場合 container / video / audio から ffmpeg コマンドが自動生成される
+#   (ソフトウェアエンコーダ前提。既定: m2ts/m2tsll/mp4/hls = libx264 + aac, webm = libvpx-vp9 + libvorbis)。
+# - video / audio も省略した場合は無変換 (isUnconverted) 配信になる。
+# - NVENC / QSV などハードウェアエンコーダは -preset / -tune 等のオプション体系が異なり
+#   自動生成コマンドでは動かないため、必ず cmd を明示すること (下部のコメント例を参照)。
+# - id は運用中に変更しないこと (クライアントに保存された設定が無効になる)。
+# - 旧形式の ?mode=N は「同じ container 内の並び順」で解決されるため、各 container 内の
+#   解像度の並び (1080p → 720p → 480p → ...) は変更しないこと。
 stream:
-    live:
-        ts:
-            m2ts:
-                - name: 1080p
-                  cmd:
-                      '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -threads 0 -c:a aac -ar 48000 -b:a 192k -ac 2
-                      -c:v libx264 -vf yadif,scale=-2:1080 -b:v 3000k -preset veryfast -y -f mpegts pipe:1'
-                - name: 720p
-                  cmd:
-                      '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -threads 0 -c:a aac -ar 48000 -b:a 192k -ac 2
-                      -c:v libx264 -vf yadif,scale=-2:720 -b:v 3000k -preset veryfast -y -f mpegts pipe:1'
-                - name: 480p
-                  cmd:
-                      '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -threads 0 -c:a aac -ar 48000 -b:a 128k -ac 2
-                      -c:v libx264 -vf yadif,scale=-2:480 -b:v 1500k -preset veryfast -y -f mpegts pipe:1'
-                - name: 無変換
+    profiles:
+        live:
+            # ================= HLS (in-memory 低遅延・ディスク書き込みなし) =================
+            # cmd が %streamFileDir% を含まない場合、fragmented MP4 を標準出力 (pipe:1) へ書き出す
+            # コマンドとみなされ、セグメントはメモリ上でのみ保持・配信される (Windows でも動作)
+            # cmd に | を含めるとシェル経由で実行される (tsreadex などの前処理に利用可)
+            # 従来の TS セグメント方式 (ディスク書き込み) に戻す場合は下部のコメント例を参照
+            - id: live-hls-1080p-avc
+              name: 1080p(低遅延)
+              container: hls
+              video:
+                  codec: libx264
+                  height: 1080
+                  bitrate: 5000
+              audio:
+                  codec: aac
+                  bitrate: 192
+              cmd:
+                  '%FFMPEG% -dual_mono_mode main -fflags nobuffer -i pipe:0 -sn -threads 0 -max_muxing_queue_size 1024
+                  -c:a aac -ar 48000 -b:a 192k -ac 2
+                  -c:v libx264 -vf yadif,scale=-2:1080 -b:v 5000k -maxrate 5000k -bufsize 10000k
+                  -profile:v high -level 4.1 -preset veryfast -tune fastdecode,zerolatency
+                  -g 15 -keyint_min 15 -sc_threshold 0
+                  -movflags empty_moov+default_base_moof+frag_keyframe -f mp4 pipe:1'
+            - id: live-hls-720p-avc
+              name: 720p(低遅延)
+              container: hls
+              video:
+                  codec: libx264
+                  height: 720
+                  bitrate: 3000
+              audio:
+                  codec: aac
+                  bitrate: 192
+              cmd:
+                  '%FFMPEG% -dual_mono_mode main -fflags nobuffer -i pipe:0 -sn -threads 0 -max_muxing_queue_size 1024
+                  -c:a aac -ar 48000 -b:a 192k -ac 2
+                  -c:v libx264 -vf yadif,scale=-2:720 -b:v 3000k -maxrate 3000k -bufsize 6000k
+                  -profile:v high -level 4.0 -preset veryfast -tune fastdecode,zerolatency
+                  -g 15 -keyint_min 15 -sc_threshold 0
+                  -movflags empty_moov+default_base_moof+frag_keyframe -f mp4 pipe:1'
+            - id: live-hls-480p-avc
+              name: 480p(低遅延)
+              container: hls
+              video:
+                  codec: libx264
+                  height: 480
+                  bitrate: 1500
+              audio:
+                  codec: aac
+                  bitrate: 128
+              cmd:
+                  '%FFMPEG% -dual_mono_mode main -fflags nobuffer -i pipe:0 -sn -threads 0 -max_muxing_queue_size 1024
+                  -c:a aac -ar 48000 -b:a 128k -ac 2
+                  -c:v libx264 -vf yadif,scale=-2:480 -b:v 1500k -maxrate 1500k -bufsize 3000k
+                  -profile:v main -level 3.1 -preset veryfast -tune fastdecode,zerolatency
+                  -g 15 -keyint_min 15 -sc_threshold 0
+                  -movflags empty_moov+default_base_moof+frag_keyframe -f mp4 pipe:1'
 
-            m2tsll:
-                - name: 1080p
-                  cmd:
-                      '%FFMPEG% -dual_mono_mode main -f mpegts -analyzeduration 500000 -i pipe:0 -map 0 -c:s copy -c:d
-                      copy -ignore_unknown -fflags nobuffer -flags low_delay -max_delay 250000 -max_interleave_delta 1
-                      -threads 0 -c:a aac -ar 48000 -b:a 192k -ac 2 -c:v libx264 -flags +cgop -vf yadif,scale=-2:1080
-                      -b:v 3000k -preset veryfast -y -f mpegts pipe:1'
-                - name: 720p
-                  cmd:
-                      '%FFMPEG% -dual_mono_mode main -f mpegts -analyzeduration 500000 -i pipe:0 -map 0 -c:s copy -c:d
-                      copy -ignore_unknown -fflags nobuffer -flags low_delay -max_delay 250000 -max_interleave_delta 1
-                      -threads 0 -c:a aac -ar 48000 -b:a 192k -ac 2 -c:v libx264 -flags +cgop -vf yadif,scale=-2:720
-                      -b:v 3000k -preset veryfast -y -f mpegts pipe:1'
-                - name: 480p
-                  cmd:
-                      '%FFMPEG% -dual_mono_mode main -f mpegts -analyzeduration 500000 -i pipe:0 -map 0 -c:s copy -c:d
-                      copy -ignore_unknown -fflags nobuffer -flags low_delay -max_delay 250000 -max_interleave_delta 1
-                      -threads 0 -c:a aac -ar 48000 -b:a 128k -ac 2 -c:v libx264 -flags +cgop -vf yadif,scale=-2:480
-                      -b:v 1500k -preset veryfast -y -f mpegts pipe:1'
+            # ------------- HLS 追加プリセット (HEVC / NVENC / QSV / VAAPI) -------------
+            # これらの組み合わせはファイル先頭の encodePresets (hwaccel: nvenc / qsv / vaapi,
+            # codecs: [h264, hevc]) で自動生成できる。個別に手書きしたい場合や
+            # GPU デコード (-hwaccel cuda 等) まで含めて細かく調整したい場合のみ、
+            # 生成された cmd を出発点にこの配列へ書き足すこと。
+            #
+            # ----- tsreadex で TS を前処理する場合 (デュアルモノ分離・欠落音声の無音埋め・ワンセグ等の除去) -----
+            # tsreadex のパスは config の tsreadex で指定 (省略時は PATH 上の tsreadex)
+            # - id: live-hls-720p-tsreadex
+            #   name: 720p(tsreadex)
+            #   container: hls
+            #   cmd:
+            #       '%TSREADEX% -x 18 -n -1 -a 13 -b 5 -c 1 -u 1 - | %FFMPEG% -re -f mpegts -analyzeduration 500000 -i pipe:0
+            #       -sn -threads 0 -max_muxing_queue_size 1024
+            #       -c:a aac -ar 48000 -b:a 192k -ac 2
+            #       -c:v libx264 -vf yadif,scale=-2:720 -b:v 3000k -maxrate 3000k -bufsize 6000k
+            #       -profile:v high -level 4.0 -preset veryfast -tune fastdecode,zerolatency
+            #       -g 30 -keyint_min 30 -sc_threshold 0
+            #       -movflags empty_moov+default_base_moof+frag_keyframe -f mp4 pipe:1'
+            #
+            # ----- 従来の TS セグメント方式 (ディスク書き込みあり・字幕対応) -----
+            # - id: live-hls-720p-tssegment
+            #   name: 720p(TSセグメント)
+            #   container: hls
+            #   cmd:
+            #       '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -map 0 -threads 0 -ignore_unknown
+            #       -max_muxing_queue_size 1024 -f hls -hls_time 3 -hls_list_size 17 -hls_allow_cache 1
+            #       -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags delete_segments -c:a
+            #       aac -ar 48000 -b:a 192k -ac 2 -c:v libx264 -vf yadif,scale=-2:720 -b:v 3000k -preset veryfast
+            #       -flags +loop-global_header %OUTPUT%'
+            # - id: live-hls-720p-arib
+            #   name: 720p(arib)
+            #   container: hls
+            #   cmd:
+            #       '%FFMPEG% -re -dual_mono_mode main -fix_sub_duration -i pipe:0 -threads 0 -ignore_unknown
+            #       -max_muxing_queue_size 1024 -f hls -hls_time 3 -hls_list_size 17 -hls_allow_cache 1
+            #       -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags delete_segments -c:a
+            #       aac -ar 48000 -b:a 192k -ac 2 -c:v libx264 -vf yadif,scale=-2:720 -b:v 3000k -preset veryfast
+            #       -flags +loop-global_header -c:s webvtt -master_pl_name stream%streamNum%.m3u8
+            #       %streamFileDir%/stream%streamNum%-child.m3u8'
 
-            webm:
-                - name: 1080p
-                  cmd:
-                      '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -threads 3 -c:a libvorbis -ar 48000 -b:a 192k -ac
-                      2 -c:v libvpx-vp9 -vf yadif,scale=-2:1080 -b:v 3000k -deadline realtime -speed 4 -cpu-used -8 -y -f
-                      webm pipe:1'
-                - name: 720p
-                  cmd:
-                      '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -threads 3 -c:a libvorbis -ar 48000 -b:a 192k -ac
-                      2 -c:v libvpx-vp9 -vf yadif,scale=-2:720 -b:v 3000k -deadline realtime -speed 4 -cpu-used -8 -y -f
-                      webm pipe:1'
-                - name: 480p
-                  cmd:
-                      '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -threads 2 -c:a libvorbis -ar 48000 -b:a 128k -ac
-                      2 -c:v libvpx-vp9 -vf yadif,scale=-2:480 -b:v 1500k -deadline realtime -speed 4 -cpu-used -8 -y -f
-                      webm pipe:1'
+            # ================= M2TS (MPEG-TS / 外部プレイヤー向け) =================
+            # cmd 省略時は container / video / audio から自動生成される
+            - id: live-m2ts-1080p-avc
+              name: 1080p
+              container: m2ts
+              video:
+                  codec: libx264
+                  height: 1080
+                  bitrate: 3000
+              audio:
+                  codec: aac
+                  bitrate: 192
+            - id: live-m2ts-720p-avc
+              name: 720p
+              container: m2ts
+              video:
+                  codec: libx264
+                  height: 720
+                  bitrate: 3000
+              audio:
+                  codec: aac
+                  bitrate: 192
+            - id: live-m2ts-480p-avc
+              name: 480p
+              container: m2ts
+              video:
+                  codec: libx264
+                  height: 480
+                  bitrate: 1500
+              audio:
+                  codec: aac
+                  bitrate: 128
+            - id: live-m2ts-unconverted
+              name: 無変換
+              container: m2ts
 
-            mp4:
-                - name: 1080p
-                  cmd:
-                      '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -threads 0 -c:a aac -ar 48000 -b:a 192k -ac 2
-                      -c:v libx264 -vf yadif,scale=-2:1080 -b:v 3000k -profile:v baseline -preset veryfast -tune
-                      fastdecode,zerolatency -movflags frag_keyframe+empty_moov+faststart+default_base_moof -y -f mp4
-                      pipe:1'
-                - name: 720p
-                  cmd:
-                      '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -threads 0 -c:a aac -ar 48000 -b:a 192k -ac 2
-                      -c:v libx264 -vf yadif,scale=-2:720 -b:v 3000k -profile:v baseline -preset veryfast -tune
-                      fastdecode,zerolatency -movflags frag_keyframe+empty_moov+faststart+default_base_moof -y -f mp4
-                      pipe:1'
-                - name: 480p
-                  cmd:
-                      '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -threads 0 -c:a aac -ar 48000 -b:a 128k -ac 2
-                      -c:v libx264 -vf yadif,scale=-2:480 -b:v 1500k -profile:v baseline -preset veryfast -tune
-                      fastdecode,zerolatency -movflags frag_keyframe+empty_moov+faststart+default_base_moof -y -f mp4
-                      pipe:1'
+            # ================= M2TS 低遅延 (m2tsll) =================
+            - id: live-m2tsll-1080p-avc
+              name: 1080p
+              container: m2tsll
+              video:
+                  codec: libx264
+                  height: 1080
+                  bitrate: 3000
+              audio:
+                  codec: aac
+                  bitrate: 192
+            - id: live-m2tsll-720p-avc
+              name: 720p
+              container: m2tsll
+              video:
+                  codec: libx264
+                  height: 720
+                  bitrate: 3000
+              audio:
+                  codec: aac
+                  bitrate: 192
+            - id: live-m2tsll-480p-avc
+              name: 480p
+              container: m2tsll
+              video:
+                  codec: libx264
+                  height: 480
+                  bitrate: 1500
+              audio:
+                  codec: aac
+                  bitrate: 128
 
-            hls:
-                - name: 1080p
-                  cmd:
-                      '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -map 0 -threads 0 -ignore_unknown
-                      -max_muxing_queue_size 1024 -f hls -hls_time 3 -hls_list_size 17 -hls_allow_cache 1
-                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags delete_segments -c:a
-                      aac -ar 48000 -b:a 192k -ac 2 -c:v libx264 -vf yadif,scale=-2:1080 -b:v 3000k -preset veryfast
-                      -flags +loop-global_header %OUTPUT%'
-                - name: 720p
-                  cmd:
-                      '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -map 0 -threads 0 -ignore_unknown
-                      -max_muxing_queue_size 1024 -f hls -hls_time 3 -hls_list_size 17 -hls_allow_cache 1
-                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags delete_segments -c:a
-                      aac -ar 48000 -b:a 192k -ac 2 -c:v libx264 -vf yadif,scale=-2:720 -b:v 3000k -preset veryfast
-                      -flags +loop-global_header %OUTPUT%'
-                - name: 480p
-                  cmd:
-                      '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -map 0 -threads 0 -ignore_unknown
-                      -max_muxing_queue_size 1024 -f hls -hls_time 3 -hls_list_size 17 -hls_allow_cache 1
-                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags delete_segments -c:a
-                      aac -ar 48000 -b:a 128k -ac 2 -c:v libx264 -vf yadif,scale=-2:480 -b:v 1500k -preset veryfast
-                      -flags +loop-global_header %OUTPUT%'
-                # - name: 720p (arib)
-                #   cmd:
-                #       '%FFMPEG% -re -dual_mono_mode main -fix_sub_duration -i pipe:0 -threads 0 -ignore_unknown
-                #       -max_muxing_queue_size 1024 -f hls -hls_time 3 -hls_list_size 17 -hls_allow_cache 1
-                #       -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags delete_segments -c:a
-                #       aac -ar 48000 -b:a 192k -ac 2 -c:v libx264 -vf yadif,scale=-2:720 -b:v 3000k -preset veryfast
-                #       -flags +loop-global_header -c:s webvtt -master_pl_name stream%streamNum%.m3u8
-                #       %streamFileDir%/stream%streamNum%-child.m3u8'
+            # ================= MP4 =================
+            - id: live-mp4-1080p-avc
+              name: 1080p
+              container: mp4
+              video:
+                  codec: libx264
+                  height: 1080
+                  bitrate: 3000
+              audio:
+                  codec: aac
+                  bitrate: 192
+            - id: live-mp4-720p-avc
+              name: 720p
+              container: mp4
+              video:
+                  codec: libx264
+                  height: 720
+                  bitrate: 3000
+              audio:
+                  codec: aac
+                  bitrate: 192
+            - id: live-mp4-480p-avc
+              name: 480p
+              container: mp4
+              video:
+                  codec: libx264
+                  height: 480
+                  bitrate: 1500
+              audio:
+                  codec: aac
+                  bitrate: 128
 
-    recorded:
-        ts:
-            webm:
-                - name: 1080p
-                  cmd:
-                      '%FFMPEG% -dual_mono_mode main -i pipe:0 -sn -threads 3 -c:a libvorbis -ar 48000 -b:a 192k -ac 2
-                      -c:v libvpx-vp9 -vf yadif,scale=-2:1080 -b:v 3000k -deadline realtime -speed 4 -cpu-used -8 -y -f
-                      webm pipe:1'
-                - name: 720p
-                  cmd:
-                      '%FFMPEG% -dual_mono_mode main -i pipe:0 -sn -threads 3 -c:a libvorbis -ar 48000 -b:a 192k -ac 2
-                      -c:v libvpx-vp9 -vf yadif,scale=-2:720 -b:v 3000k -deadline realtime -speed 4 -cpu-used -8 -y -f
-                      webm pipe:1'
-                - name: 480p
-                  cmd:
-                      '%FFMPEG% -dual_mono_mode main -i pipe:0 -sn -threads 3 -c:a libvorbis -ar 48000 -b:a 128k -ac 2
-                      -c:v libvpx-vp9 -vf yadif,scale=-2:480 -b:v 1500k -deadline realtime -speed 4 -cpu-used -8 -y -f
-                      webm pipe:1'
+            # ================= WebM =================
+            - id: live-webm-1080p
+              name: 1080p
+              container: webm
+              video:
+                  codec: libvpx-vp9
+                  height: 1080
+                  bitrate: 3000
+              audio:
+                  codec: libvorbis
+                  bitrate: 192
+            - id: live-webm-720p
+              name: 720p
+              container: webm
+              video:
+                  codec: libvpx-vp9
+                  height: 720
+                  bitrate: 3000
+              audio:
+                  codec: libvorbis
+                  bitrate: 192
+            - id: live-webm-480p
+              name: 480p
+              container: webm
+              video:
+                  codec: libvpx-vp9
+                  height: 480
+                  bitrate: 1500
+              audio:
+                  codec: libvorbis
+                  bitrate: 128
 
-            mp4:
-                - name: 1080p
+        recorded:
+            # 録画再生用。mp4 / hls は再生開始までの待ち時間とシーク応答を短縮する低遅延設定を採用:
+            #   - -fflags nobuffer / -flags low_delay / -analyzeduration 500000: 入力解析の待ちを最小化
+            #   - -g 30 -keyint_min 30 -sc_threshold 0: GOP を約 1 秒に固定しシーク・セグメント境界を揃える
+            #   - -tune fastdecode,zerolatency: エンコーダ内部の先読み (B フレーム等) を無効化
+            #   - mp4: fragmented MP4 を即時出力 (-frag_duration 500000)
+            #   - hls: -hls_time 1 で 1 秒セグメント化し、初回再生開始を高速化
+            ts:
+                # ================= MP4 (低遅延) =================
+                - id: recorded-ts-mp4-1080p-avc
+                  name: 1080p(低遅延)
+                  container: mp4
+                  video:
+                      codec: libx264
+                      height: 1080
+                      bitrate: 3000
+                  audio:
+                      codec: aac
+                      bitrate: 192
                   cmd:
-                      '%FFMPEG% -dual_mono_mode main -i pipe:0 -sn -threads 0 -c:a aac -ar 48000 -b:a 192k -ac 2 -c:v
-                      libx264 -vf yadif,scale=-2:1080 -b:v 3000k -profile:v baseline -preset veryfast -tune
-                      fastdecode,zerolatency -movflags frag_keyframe+empty_moov+faststart+default_base_moof -y -f mp4
-                      pipe:1'
-                - name: 720p
+                      '%FFMPEG% -dual_mono_mode main -fflags nobuffer -flags low_delay
+                      -analyzeduration 500000 -probesize 5000000 -i pipe:0 -sn -threads 0
+                      -max_muxing_queue_size 1024 -max_interleave_delta 1
+                      -c:a aac -ar 48000 -b:a 192k -ac 2
+                      -c:v libx264 -vf yadif,scale=-2:1080 -b:v 3000k -maxrate 3000k -bufsize 6000k
+                      -profile:v high -level 4.1 -preset veryfast -tune fastdecode,zerolatency
+                      -g 30 -keyint_min 30 -sc_threshold 0
+                      -movflags empty_moov+default_base_moof+frag_keyframe -frag_duration 500000
+                      -y -f mp4 pipe:1'
+                - id: recorded-ts-mp4-720p-avc
+                  name: 720p(低遅延)
+                  container: mp4
+                  video:
+                      codec: libx264
+                      height: 720
+                      bitrate: 3000
+                  audio:
+                      codec: aac
+                      bitrate: 192
                   cmd:
-                      '%FFMPEG% -dual_mono_mode main -i pipe:0 -sn -threads 0 -c:a aac -ar 48000 -b:a 192k -ac 2 -c:v
-                      libx264 -vf yadif,scale=-2:720 -b:v 3000k -profile:v baseline -preset veryfast -tune
-                      fastdecode,zerolatency -movflags frag_keyframe+empty_moov+faststart+default_base_moof -y -f mp4
-                      pipe:1'
-                - name: 480p
+                      '%FFMPEG% -dual_mono_mode main -fflags nobuffer -flags low_delay
+                      -analyzeduration 500000 -probesize 5000000 -i pipe:0 -sn -threads 0
+                      -max_muxing_queue_size 1024 -max_interleave_delta 1
+                      -c:a aac -ar 48000 -b:a 192k -ac 2
+                      -c:v libx264 -vf yadif,scale=-2:720 -b:v 3000k -maxrate 3000k -bufsize 6000k
+                      -profile:v high -level 4.0 -preset veryfast -tune fastdecode,zerolatency
+                      -g 30 -keyint_min 30 -sc_threshold 0
+                      -movflags empty_moov+default_base_moof+frag_keyframe -frag_duration 500000
+                      -y -f mp4 pipe:1'
+                - id: recorded-ts-mp4-480p-avc
+                  name: 480p(低遅延)
+                  container: mp4
+                  video:
+                      codec: libx264
+                      height: 480
+                      bitrate: 1500
+                  audio:
+                      codec: aac
+                      bitrate: 128
                   cmd:
-                      '%FFMPEG% -dual_mono_mode main -i pipe:0 -sn -threads 0 -c:a aac -ar 48000 -b:a 128k -ac 2 -c:v
-                      libx264 -vf yadif,scale=-2:480 -b:v 1500k -profile:v baseline -preset veryfast -tune
-                      fastdecode,zerolatency -movflags frag_keyframe+empty_moov+faststart+default_base_moof -y -f mp4
-                      pipe:1'
+                      '%FFMPEG% -dual_mono_mode main -fflags nobuffer -flags low_delay
+                      -analyzeduration 500000 -probesize 5000000 -i pipe:0 -sn -threads 0
+                      -max_muxing_queue_size 1024 -max_interleave_delta 1
+                      -c:a aac -ar 48000 -b:a 128k -ac 2
+                      -c:v libx264 -vf yadif,scale=-2:480 -b:v 1500k -maxrate 1500k -bufsize 3000k
+                      -profile:v main -level 3.1 -preset veryfast -tune fastdecode,zerolatency
+                      -g 30 -keyint_min 30 -sc_threshold 0
+                      -movflags empty_moov+default_base_moof+frag_keyframe -frag_duration 500000
+                      -y -f mp4 pipe:1'
+                # ----- ハードウェア / HEVC 版 -----
+                # encodePresets (targets: [recordedStreaming]) の hwaccel / codecs で自動生成できる。
+                # 個別調整したい場合のみ、生成された cmd を出発点にこの配列へ書き足すこと。
 
-            hls:
-                - name: 1080p
+                # ================= HLS (低遅延・1 秒セグメント) =================
+                - id: recorded-ts-hls-1080p-avc
+                  name: 1080p(低遅延)
+                  container: hls
+                  video:
+                      codec: libx264
+                      height: 1080
+                      bitrate: 3000
+                  audio:
+                      codec: aac
+                      bitrate: 192
                   cmd:
                       '%FFMPEG% -dual_mono_mode main -i pipe:0 -sn -map 0 -threads 0 -ignore_unknown
-                      -max_muxing_queue_size 1024 -f hls -hls_time 3 -hls_list_size 0 -hls_allow_cache 1
-                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags delete_segments -c:a
-                      aac -ar 48000 -b:a 192k -ac 2 -c:v libx264 -vf yadif,scale=-2:1080 -b:v 3000k -preset veryfast
+                      -max_muxing_queue_size 1024 -max_interleave_delta 1
+                      -f hls -hls_time 1 -hls_list_size 0 -hls_allow_cache 1
+                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts
+                      -hls_flags delete_segments+independent_segments
+                      -c:a aac -ar 48000 -b:a 192k -ac 2
+                      -c:v libx264 -vf yadif,scale=-2:1080 -b:v 3000k -maxrate 3000k -bufsize 6000k
+                      -preset veryfast -tune fastdecode,zerolatency
+                      -g 30 -keyint_min 30 -sc_threshold 0
                       -flags +loop-global_header %OUTPUT%'
-                - name: 720p
+                - id: recorded-ts-hls-720p-avc
+                  name: 720p(低遅延)
+                  container: hls
+                  video:
+                      codec: libx264
+                      height: 720
+                      bitrate: 3000
+                  audio:
+                      codec: aac
+                      bitrate: 192
                   cmd:
                       '%FFMPEG% -dual_mono_mode main -i pipe:0 -sn -map 0 -threads 0 -ignore_unknown
-                      -max_muxing_queue_size 1024 -f hls -hls_time 3 -hls_list_size 0 -hls_allow_cache 1
-                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags delete_segments -c:a
-                      aac -ar 48000 -b:a 192k -ac 2 -c:v libx264 -vf yadif,scale=-2:720 -b:v 3000k -preset veryfast
+                      -max_muxing_queue_size 1024 -max_interleave_delta 1
+                      -f hls -hls_time 1 -hls_list_size 0 -hls_allow_cache 1
+                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts
+                      -hls_flags delete_segments+independent_segments
+                      -c:a aac -ar 48000 -b:a 192k -ac 2
+                      -c:v libx264 -vf yadif,scale=-2:720 -b:v 3000k -maxrate 3000k -bufsize 6000k
+                      -preset veryfast -tune fastdecode,zerolatency
+                      -g 30 -keyint_min 30 -sc_threshold 0
                       -flags +loop-global_header %OUTPUT%'
-                - name: 480p
+                - id: recorded-ts-hls-480p-avc
+                  name: 480p(低遅延)
+                  container: hls
+                  video:
+                      codec: libx264
+                      height: 480
+                      bitrate: 1500
+                  audio:
+                      codec: aac
+                      bitrate: 128
                   cmd:
                       '%FFMPEG% -dual_mono_mode main -i pipe:0 -sn -map 0 -threads 0 -ignore_unknown
-                      -max_muxing_queue_size 1024 -f hls -hls_time 3 -hls_list_size 0 -hls_allow_cache 1
-                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags delete_segments -c:a
-                      aac -ar 48000 -b:a 128k -ac 2 -c:v libx264 -vf yadif,scale=-2:480 -b:v 1500k -preset veryfast
+                      -max_muxing_queue_size 1024 -max_interleave_delta 1
+                      -f hls -hls_time 1 -hls_list_size 0 -hls_allow_cache 1
+                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts
+                      -hls_flags delete_segments+independent_segments
+                      -c:a aac -ar 48000 -b:a 128k -ac 2
+                      -c:v libx264 -vf yadif,scale=-2:480 -b:v 1500k -maxrate 1500k -bufsize 3000k
+                      -preset veryfast -tune fastdecode,zerolatency
+                      -g 30 -keyint_min 30 -sc_threshold 0
                       -flags +loop-global_header %OUTPUT%'
-                # - name: 720p (arib)
+                # ----- 字幕付き (arib 字幕 → WebVTT) で配信したい場合の例 -----
+                # - id: recorded-ts-hls-720p-arib
+                #   name: 720p(arib)
+                #   container: hls
                 #   cmd:
                 #       '%FFMPEG% -dual_mono_mode main -fix_sub_duration -i pipe:0 -threads 0 -ignore_unknown
                 #       -max_muxing_queue_size 1024 -f hls -hls_time 3 -hls_list_size 0 -hls_allow_cache 1
-                #       -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags delete_segments -c:a
-                #       aac -ar 48000 -b:a 192k -ac 2 -c:v libx264 -vf yadif,scale=-2:720 -b:v 3000k -preset veryfast
-                #       -flags +loop-global_header -c:s webvtt -master_pl_name stream%streamNum%.m3u8
+                #       -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -c:a aac -ar 48000 -b:a
+                #       192k -ac 2 -c:v libx264 -vf yadif,scale=-2:720 -b:v 3000k -preset veryfast -flags
+                #       +loop-global_header -c:s webvtt -master_pl_name stream%streamNum%.m3u8
                 #       %streamFileDir%/stream%streamNum%-child.m3u8'
 
-        encoded:
-            webm:
-                - name: 1080p
-                  cmd:
-                      '%FFMPEG% -dual_mono_mode main -ss %SS% -i %INPUT% -sn -threads 3 -c:a libvorbis -ar 48000 -b:a
-                      192k -ac 2 -c:v libvpx-vp9 -vf scale=-2:1080 -b:v 3000k -deadline realtime -speed 4 -cpu-used -8 -y
-                      -f webm pipe:1'
-                - name: 720p
-                  cmd:
-                      '%FFMPEG% -dual_mono_mode main -ss %SS% -i %INPUT% -sn -threads 3 -c:a libvorbis -ar 48000 -b:a
-                      192k -ac 2 -c:v libvpx-vp9 -vf scale=-2:720 -b:v 3000k -deadline realtime -speed 4 -cpu-used -8 -y
-                      -f webm pipe:1'
-                - name: 480p
-                  cmd:
-                      '%FFMPEG% -dual_mono_mode main -ss %SS% -i %INPUT% -sn -threads 3 -c:a libvorbis -ar 48000 -b:a
-                      128k -ac 2 -c:v libvpx-vp9 -vf scale=-2:480 -b:v 1500k -deadline realtime -speed 4 -cpu-used -8 -y
-                      -f webm pipe:1'
+                # ================= WebM =================
+                - id: recorded-ts-webm-1080p
+                  name: 1080p
+                  container: webm
+                  video:
+                      codec: libvpx-vp9
+                      height: 1080
+                      bitrate: 3000
+                  audio:
+                      codec: libvorbis
+                      bitrate: 192
+                - id: recorded-ts-webm-720p
+                  name: 720p
+                  container: webm
+                  video:
+                      codec: libvpx-vp9
+                      height: 720
+                      bitrate: 3000
+                  audio:
+                      codec: libvorbis
+                      bitrate: 192
+                - id: recorded-ts-webm-480p
+                  name: 480p
+                  container: webm
+                  video:
+                      codec: libvpx-vp9
+                      height: 480
+                      bitrate: 1500
+                  audio:
+                      codec: libvorbis
+                      bitrate: 128
 
-            mp4:
-                - name: 1080p
+            # エンコード済みファイルの再生用。インターレース解除済みのため yadif は不要。
+            # シーク位置は -ss %SS% で渡されるため、入力は pipe:0 ではなく %INPUT% を使うこと。
+            encoded:
+                # ================= MP4 (低遅延) =================
+                - id: recorded-encoded-mp4-1080p-avc
+                  name: 1080p(低遅延)
+                  container: mp4
+                  video:
+                      codec: libx264
+                      height: 1080
+                      bitrate: 3000
+                  audio:
+                      codec: aac
+                      bitrate: 192
                   cmd:
-                      '%FFMPEG% -dual_mono_mode main -ss %SS% -i %INPUT% -sn -threads 0 -c:a aac -ar 48000 -b:a 192k -ac
-                      2 -c:v libx264 -vf scale=-2:1080 -b:v 3000k -profile:v baseline -preset veryfast -tune
-                      fastdecode,zerolatency -movflags frag_keyframe+empty_moov+faststart+default_base_moof -y -f mp4
-                      pipe:1'
-                - name: 720p
+                      '%FFMPEG% -dual_mono_mode main -fflags nobuffer -flags low_delay
+                      -analyzeduration 500000 -probesize 5000000 -ss %SS% -i %INPUT% -sn -threads 0
+                      -max_muxing_queue_size 1024 -max_interleave_delta 1
+                      -c:a aac -ar 48000 -b:a 192k -ac 2
+                      -c:v libx264 -vf scale=-2:1080 -b:v 3000k -maxrate 3000k -bufsize 6000k
+                      -profile:v high -level 4.1 -preset veryfast -tune fastdecode,zerolatency
+                      -g 30 -keyint_min 30 -sc_threshold 0
+                      -movflags empty_moov+default_base_moof+frag_keyframe -frag_duration 500000
+                      -y -f mp4 pipe:1'
+                - id: recorded-encoded-mp4-720p-avc
+                  name: 720p(低遅延)
+                  container: mp4
+                  video:
+                      codec: libx264
+                      height: 720
+                      bitrate: 3000
+                  audio:
+                      codec: aac
+                      bitrate: 192
                   cmd:
-                      '%FFMPEG% -dual_mono_mode main -ss %SS% -i %INPUT% -sn -threads 0 -c:a aac -ar 48000 -b:a 192k -ac
-                      2 -c:v libx264 -vf scale=-2:720 -b:v 3000k -profile:v baseline -preset veryfast -tune
-                      fastdecode,zerolatency -movflags frag_keyframe+empty_moov+faststart+default_base_moof -y -f mp4
-                      pipe:1'
-                - name: 480p
+                      '%FFMPEG% -dual_mono_mode main -fflags nobuffer -flags low_delay
+                      -analyzeduration 500000 -probesize 5000000 -ss %SS% -i %INPUT% -sn -threads 0
+                      -max_muxing_queue_size 1024 -max_interleave_delta 1
+                      -c:a aac -ar 48000 -b:a 192k -ac 2
+                      -c:v libx264 -vf scale=-2:720 -b:v 3000k -maxrate 3000k -bufsize 6000k
+                      -profile:v high -level 4.0 -preset veryfast -tune fastdecode,zerolatency
+                      -g 30 -keyint_min 30 -sc_threshold 0
+                      -movflags empty_moov+default_base_moof+frag_keyframe -frag_duration 500000
+                      -y -f mp4 pipe:1'
+                - id: recorded-encoded-mp4-480p-avc
+                  name: 480p(低遅延)
+                  container: mp4
+                  video:
+                      codec: libx264
+                      height: 480
+                      bitrate: 1500
+                  audio:
+                      codec: aac
+                      bitrate: 128
                   cmd:
-                      '%FFMPEG% -dual_mono_mode main -ss %SS% -i %INPUT% -sn -threads 0 -c:a aac -ar 48000 -b:a 128k -ac
-                      2 -c:v libx264 -vf scale=-2:480 -b:v 1500k -profile:v baseline -preset veryfast -tune
-                      fastdecode,zerolatency -movflags frag_keyframe+empty_moov+faststart+default_base_moof -y -f mp4
-                      pipe:1'
+                      '%FFMPEG% -dual_mono_mode main -fflags nobuffer -flags low_delay
+                      -analyzeduration 500000 -probesize 5000000 -ss %SS% -i %INPUT% -sn -threads 0
+                      -max_muxing_queue_size 1024 -max_interleave_delta 1
+                      -c:a aac -ar 48000 -b:a 128k -ac 2
+                      -c:v libx264 -vf scale=-2:480 -b:v 1500k -maxrate 1500k -bufsize 3000k
+                      -profile:v main -level 3.1 -preset veryfast -tune fastdecode,zerolatency
+                      -g 30 -keyint_min 30 -sc_threshold 0
+                      -movflags empty_moov+default_base_moof+frag_keyframe -frag_duration 500000
+                      -y -f mp4 pipe:1'
+                # ----- ハードウェア版の例 -----
+                # encodePresets (targets: [recordedStreaming]) の hwaccel / codecs で自動生成できる。
 
-            hls:
-                - name: 1080p
+                # ================= HLS (低遅延・1 秒セグメント) =================
+                - id: recorded-encoded-hls-1080p-avc
+                  name: 1080p(低遅延)
+                  container: hls
+                  video:
+                      codec: libx264
+                      height: 1080
+                      bitrate: 3000
+                  audio:
+                      codec: aac
+                      bitrate: 192
                   cmd:
                       '%FFMPEG% -dual_mono_mode main -ss %SS% -i %INPUT% -sn -threads 0 -ignore_unknown
-                      -max_muxing_queue_size 1024 -f hls -hls_time 3 -hls_list_size 0 -hls_allow_cache 1
-                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags delete_segments -c:a
-                      aac -ar 48000 -b:a 192k -ac 2 -c:v libx264 -vf scale=-2:1080 -b:v 3000k -preset veryfast -flags
-                      +loop-global_header %OUTPUT%'
-                - name: 720p
+                      -max_muxing_queue_size 1024 -max_interleave_delta 1
+                      -f hls -hls_time 1 -hls_list_size 0 -hls_allow_cache 1
+                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts
+                      -hls_flags delete_segments+independent_segments
+                      -c:a aac -ar 48000 -b:a 192k -ac 2
+                      -c:v libx264 -vf scale=-2:1080 -b:v 3000k -maxrate 3000k -bufsize 6000k
+                      -preset veryfast -tune fastdecode,zerolatency
+                      -g 30 -keyint_min 30 -sc_threshold 0
+                      -flags +loop-global_header %OUTPUT%'
+                - id: recorded-encoded-hls-720p-avc
+                  name: 720p(低遅延)
+                  container: hls
+                  video:
+                      codec: libx264
+                      height: 720
+                      bitrate: 3000
+                  audio:
+                      codec: aac
+                      bitrate: 192
                   cmd:
                       '%FFMPEG% -dual_mono_mode main -ss %SS% -i %INPUT% -sn -threads 0 -ignore_unknown
-                      -max_muxing_queue_size 1024 -f hls -hls_time 3 -hls_list_size 0 -hls_allow_cache 1
-                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags delete_segments -c:a
-                      aac -ar 48000 -b:a 192k -ac 2 -c:v libx264 -vf scale=-2:720 -b:v 3000k -preset veryfast -flags
-                      +loop-global_header %OUTPUT%'
-                - name: 480p
+                      -max_muxing_queue_size 1024 -max_interleave_delta 1
+                      -f hls -hls_time 1 -hls_list_size 0 -hls_allow_cache 1
+                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts
+                      -hls_flags delete_segments+independent_segments
+                      -c:a aac -ar 48000 -b:a 192k -ac 2
+                      -c:v libx264 -vf scale=-2:720 -b:v 3000k -maxrate 3000k -bufsize 6000k
+                      -preset veryfast -tune fastdecode,zerolatency
+                      -g 30 -keyint_min 30 -sc_threshold 0
+                      -flags +loop-global_header %OUTPUT%'
+                - id: recorded-encoded-hls-480p-avc
+                  name: 480p(低遅延)
+                  container: hls
+                  video:
+                      codec: libx264
+                      height: 480
+                      bitrate: 1500
+                  audio:
+                      codec: aac
+                      bitrate: 128
                   cmd:
                       '%FFMPEG% -dual_mono_mode main -ss %SS% -i %INPUT% -sn -threads 0 -ignore_unknown
-                      -max_muxing_queue_size 1024 -f hls -hls_time 3 -hls_list_size 0 -hls_allow_cache 1
-                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags delete_segments -c:a
-                      aac -ar 48000 -b:a 128k -ac 2 -c:v libx264 -vf scale=-2:480 -b:v 3000k -preset veryfast -flags
-                      +loop-global_header %OUTPUT%'
+                      -max_muxing_queue_size 1024 -max_interleave_delta 1
+                      -f hls -hls_time 1 -hls_list_size 0 -hls_allow_cache 1
+                      -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts
+                      -hls_flags delete_segments+independent_segments
+                      -c:a aac -ar 48000 -b:a 128k -ac 2
+                      -c:v libx264 -vf scale=-2:480 -b:v 1500k -maxrate 1500k -bufsize 3000k
+                      -preset veryfast -tune fastdecode,zerolatency
+                      -g 30 -keyint_min 30 -sc_threshold 0
+                      -flags +loop-global_header %OUTPUT%'
+
+                # ================= WebM =================
+                - id: recorded-encoded-webm-1080p
+                  name: 1080p
+                  container: webm
+                  video:
+                      codec: libvpx-vp9
+                      height: 1080
+                      bitrate: 3000
+                  audio:
+                      codec: libvorbis
+                      bitrate: 192
+                - id: recorded-encoded-webm-720p
+                  name: 720p
+                  container: webm
+                  video:
+                      codec: libvpx-vp9
+                      height: 720
+                      bitrate: 3000
+                  audio:
+                      codec: libvorbis
+                      bitrate: 192
+                - id: recorded-encoded-webm-480p
+                  name: 480p
+                  container: webm
+                  video:
+                      codec: libvpx-vp9
+                      height: 480
+                      bitrate: 1500
+                  audio:
+                      codec: libvorbis
+                      bitrate: 128
+
+# 秘密情報暗号化鍵は data/key/secret.key へ自動生成・保存されます (config.yml での指定は廃止)。
+# 旧バージョンで secretKey を設定していた場合は、初回起動時にその値が鍵ファイルへ移行されます。
+
+# データ放送 (BML) 配信 (featureFlags.dataBroadcasting: true の場合のみ有効)。
+# クライアントは WebSocket (/api/dataBroadcasting/ws) でカルーセルのモジュール等を受け取ります。
+# dataBroadcasting:
+#     # WebSocket 経由のデータ放送ストリーム同時本数上限。既定 4。
+#     # 上限を超えると最も古いストリームを閉じて新しい要求を受け付けます
+#     maxStreams: 4
+
+# 機能フラグ。**未指定の項目は有効**として扱われます。
+# 止めたい機能だけ false を書いてください (featureFlags 自体を省略すると全機能が有効)。
+# featureFlags:
+#     watchHistory: true
+#     notifications: true
+#     dashboard: true
+#     systemSettings: true
+#     seriesLibrary: true
+#     metadataProviders: true
+#     programSeriesMapping: true
+#     annictSync: true
+#     nextUpPanel: true
+#     externalFileImport: true
+#     advancedSearch: true
+#     updateNotification: true
+#     dataBroadcasting: true
+
+# 録画開始のリトライ方針。
+# 前の番組が「放送時刻未定」(ARIB の duration = 0xFFFFFF) で延長していると、
+# 予約した番組の開始が遅れます。Mirakurun は EIT[p/f] で対象の番組が始まるまで
+# データを流さないため、EPGStation はその間待つ必要があります。
+# チューナー異常とは別枠で数えるので、延長待ちが異常時の再試行回数を食い潰しません。
+# recording:
+#     # 番組開始を待つ上限 (ms)。既定 3 時間。0 で待たない
+#     startWaitLimitMs: 10800000
+#     # 開始待ち中の再試行間隔 (ms)。既定 60000
+#     startWaitIntervalMs: 60000
+#     # ストリーム開始後、最初のデータを待つ時間 (ms)。既定 5000
+#     firstDataTimeoutMs: 5000
+#     # チューナー異常時の再試行 (短間隔 → 長間隔)
+#     errorFastRetryCount: 3
+#     errorFastRetryIntervalMs: 5000
+#     errorRetryCount: 27
+#     errorRetryIntervalMs: 60000
+#     # 予約した番組が EIT[p/f] present になるまで録画を始めない (既定 true)。
+#     # 前番組の延長中に録画が始まって前番組が録れてしまうのを防ぎます。
+#     # false にすると従来どおりストリームの最初のデータで録画を開始します
+#     startGateEnabled: true
+#     # EIT[p/f] を読めないまま録画を開始するまでの時間 (ms)。既定 60000
+#     startGateTimeoutMs: 60000
+#     # 放送中の番組の開始時刻が予約開始時刻よりこれ以上前なら「前の番組」とみなす (ms)。既定 120000
+#     startGateStartMarginMs: 120000
+
+# Web UI / API のログイン認証。**既定で有効**です。
+# 初回アクセス時に管理ユーザーの作成画面が表示され、最初に登録した人が
+# システム管理者になります。
+# リバースプロキシ側で認証している等で不要な場合は enabled: false を書いてください。
+# auth:
+#     enabled: false
+#     # セッションの有効期間 (ms)。既定 30 日
+#     sessionTtlMs: 2592000000
+#     # 外部プレイヤー (VLC / Infuse) や IPTV クライアント用アクセストークンの有効期間 (ms)。既定 365 日
+#     # これらは Cookie を送れないため、動画 URL のクエリに付くトークンで認証します
+#     mediaTokenTtlMs: 31536000000
+#     # ログインしていない利用者にも一般ユーザーと同じ操作を許可する。**既定で許可**。
+#     # 視聴・予約・録画閲覧はログイン不要で行える一方、
+#     # 設定変更・ユーザー管理・バージョン更新はシステム管理者としてのログインが必要です。
+#     # インターネットに公開している場合は false にしてください
+#     allowAnonymous: false
+#     # 2 人目以降のサインアップ (SSO での新規ユーザー作成) を許可するか。既定 true。
+#     # 最初にサインアップした人が自動でシステム管理者になり、以降は一般権限になります。
+#     # インターネットに公開している場合、false にして管理者が招待する運用を推奨します
+#     allowSignUp: true
+#     # Google / GitHub の SSO。ログイン前に必要なため config.yml に書きます。
+#     # コールバック URL (プロバイダ側に登録する値) の既定は
+#     #   <アクセス元 URL>/api/auth/oauth/<google|github>/callback
+#     # です。リバースプロキシ配下などで自動判定が合わない場合のみ redirectUri を明示してください。
+#     providers:
+#         google:
+#             clientId: 'xxxxxxxx.apps.googleusercontent.com'
+#             clientSecret: 'xxxxxxxx'
+#             # redirectUri: 'https://epg.example.com/api/auth/oauth/google/callback'
+#         github:
+#             clientId: 'Iv1.xxxxxxxx'
+#             clientSecret: 'xxxxxxxx'
+#             # redirectUri: 'https://epg.example.com/api/auth/oauth/github/callback'
+
+# 新しいバージョンが公開されたときに Web UI で知らせる (featureFlags.updateNotification 有効時のみ)。
+# updateChecker:
+#     # 監視するリポジトリ ('owner/repo' 形式、既定 stuayu/EPGStation)
+#     repository: 'stuayu/EPGStation'
+#     # 「最新の開発版へ更新」で追従するブランチ (既定 main)
+#     branch: 'main'
+#     # チェック間隔 (ms、既定 6 時間)。0 以下でチェックを止める
+#     checkIntervalMs: 21600000
+#     # プレリリース (rc / beta / alpha) も通知するか (既定 true。UI では色を変えて区別する)
+#     includePrerelease: true
+
+# しょぼいカレンダー ChID ⇄ Mirakurun networkId/serviceId のマッピング表 (JSON) のパス。
+# 省略時は同梱の初期データ (主要地上波キー局のみ) を使う。指定したファイルの内容は同梱データを
+# 上書き/追加する (featureFlags.metadataProviders: true の場合のみ使用される)
+# metadataChannelMappingPath: '/path/to/syobocal-channel-map.json'
+
+# チャンネルマッピング表・エイリアス辞書等の共有静的データを GitHub 等から自動取得する URL (§5.1)。
+# 起動時 + metadataSharedDataUpdateIntervalMs 間隔で取得し、ローカル (data/metadataSharedData.json) に
+# キャッシュする。オフライン/取得失敗時は前回キャッシュ→同梱データの順にフォールバックする
+# (featureFlags.metadataProviders: true の場合のみ使用される)
+# metadataSharedDataUrl: 'https://raw.githubusercontent.com/<user>/<repo>/main/syobocal-shared-data.json'
+# 自動更新間隔 (ms)。省略時 24 時間。0 を指定すると起動時取得のみで定期更新を行わない
+# metadataSharedDataUpdateIntervalMs: 86400000
+
+# 外部メタデータプロバイダーの既定値 (設定画面 (DB) に値がある場合はそちらが優先される)
+# (featureFlags.metadataProviders: true の場合のみ使用される)
+# metadataDefaults:
+#     syobocal:
+#         enabled: true
+#         # しょぼいカレンダーのアニメ作品タイトル辞書 (シリーズ自動マッピングの照合辞書) の
+#         # 自動同期間隔 (ms)。省略時 24 時間。0 を指定すると自動同期を行わない
+#         titleSyncIntervalMs: 86400000
+#     wikidata:
+#         # 全ジャンルのテレビ番組辞書 (Wikidata) を取り込むか (既定 true)。
+#         # しょぼいカレンダー / Annict がアニメ専門なのに対し、ドラマ・バラエティ・情報番組・
+#         # ニュース、さらにローカル局の番組まで収録している (約 4 万件)。API キー不要
+#         enabled: true
+#         # 辞書の自動同期間隔 (ms)。省略時 7 日。0 を指定すると自動同期を行わない
+#         syncIntervalMs: 604800000
+#     annict:
+#         enabled: false
+#         # Annict の作品辞書 (英題・ローマ字・syobocalTid 対応表) の自動同期間隔 (ms)。
+#         # 省略時 7 日。0 を指定すると自動同期を行わない。Annict はアクセストークンが必須のため、
+#         # 設定画面でトークンを登録していない場合は取得されない
+#         workSyncIntervalMs: 604800000
+#     cacheTtlMs: 86400000
+#     # 外部サービスのエンドポイント URL。Cloudflare 等のキャッシュ/プロキシを手前に置く場合に差し替える。
+#     # 設定画面 (サーバー設定 > 連携) からも変更でき、そちらが優先される。
+#     # プロキシは元サービスと同じパス・クエリ・レスポンス形式をそのまま返すこと
+#     endpoints:
+#         syobocal: 'https://cal.syoboi.jp/db.php'
+#         annict: 'https://api.annict.com/graphql'
+#         wikidata: 'https://query.wikidata.org/sparql'
+#         fxtwitter: 'https://api.fxtwitter.com/'
+#         # 共有静的データ URL (metadataSharedDataUrl と同義、こちらが優先)
+#         sharedData: ''
+
+# シリーズ自動マッピングの LLM フォールバック (featureFlags.seriesLibrary: true の場合のみ有効)。
+# 作品辞書 (しょぼいカレンダー + Annict) で確定できなかったものだけを OpenAI 互換 API へ渡し、
+# 抽出された作品名で辞書を引き直す。url と model の両方を指定した場合のみ有効になる。
+# 抽出結果は必ず辞書で検証されるため、LLM の誤生成単体で誤リンクには至らない。
+# 対象は (1) 録画単位: 辞書で引けなかった録画タイトル (2) シリーズ単位: 辞書で引けず
+# syobocalTid / annictId が両方とも空のシリーズ (メタデータ再取得の実行時)
+# seriesLlm:
+#     # OpenAI 互換 Chat Completions API のベース URL (Ollama: http://localhost:11434/v1)
+#     url: 'http://localhost:11434/v1'
+#     # モデル名 (日本語に強いモデルを推奨。例: qwen2.5:7b-instruct)
+#     model: 'qwen2.5:7b-instruct'
+#     # API キー (ローカル LLM では通常不要)
+#     # apiKey: ''
+#     # リクエストタイムアウト (ms)。省略時 30000
+#     # timeoutMs: 30000
+#     # リクエスト間隔の下限 (ms)。省略時 0 (無制限)
+#     # minIntervalMs: 0
+#     # 応答の上限トークン数。省略時 2000。
+#     # OpenRouter のフリーモデルはほぼ reasoning 系で、本文の前に思考へトークンを使う。
+#     # 小さすぎると content が空のまま finish_reason: length で切れるが、その場合は
+#     # 自動で 4 倍ずつ引き上げて再試行する (成功した値は以後の既定として使われる) ため通常は指定不要
+#     # maxTokens: 2000
+#     # 自動引き上げの上限。省略時 16000。これを超えても本文が出ない場合は失敗として扱う
+#     # maxTokensLimit: 16000
+#
+# OpenRouter のフリーモデルを使う場合の例 (分あたり上限があるため minIntervalMs は必須と考えてよい)。
+# 思考過程を本文に混ぜる reasoning 系モデルは JSON 抽出に失敗しやすいので instruct 系を選ぶこと
+# seriesLlm:
+#     url: 'https://openrouter.ai/api/v1'
+#     model: 'inclusionai/ling-3.0-flash:free'
+#     apiKey: 'sk-or-v1-xxxxxxxx'
+#     minIntervalMs: 3500
+#
+# 動作確認済みの組み合わせ (2026-07 時点): inclusionai/ling-3.0-flash:free が
+# 抽出精度・応答速度 (2〜6 秒) ともに良好。openai/gpt-oss-20b:free も可。
+# nvidia/nemotron-3-ultra-550b-a55b:free は書式指示に従わないことがあり非推奨。
+# なお OpenRouter のフリーモデルはほぼ reasoning 系なので maxTokens は既定 (2000) のままにすること
+
+# サーバー起動時のシリーズ照合パイプライン (featureFlags.seriesLibrary: true の場合は既定で自動実行される)。
+# 起動 7 分後に作品辞書 (しょぼいカレンダー + Annict) の自動同期の完了を待ち、
+# シリーズ未リンクの録画だけを先頭から再照合する (リンク済み・手動ロック済みの録画には触れない)
+# seriesStartup:
+#     # false で起動時の自動実行を止める (既定 true)
+#     enable: true
+#     # true: 未リンク録画を毎回先頭から再照合 / false: 前回の続きから新規分のみ (既定 true)
+#     rescanUnlinked: true
+#     # 起動からパイプライン開始までの待機 (ms)。既定 420000 (7 分)
+#     delayMs: 420000
+#     # 辞書同期の完了待ちの上限 (ms)。既定 1800000 (30 分)
+#     dictionaryWaitMs: 1800000
+
+# Webhook / Discord 通知（featureFlags.notifications: true の場合のみ有効）
+# notifications:
+#     maxAttempts: 5
+#     baseDelayMs: 1000
+#     timeoutMs: 10000
+#     targets:
+#         - name: discord
+#           type: discord
+#           url: https://discord.com/api/webhooks/...
+#           events: [recording.started, recording.completed, recording.failed]
+#         - name: automation
+#           type: webhook
+#           url: https://example.invalid/epgstation
+#           secret: change-me

@@ -3,7 +3,7 @@
         <v-dialog v-if="isRemove === false" v-model="dialogModel" max-width="500" scrollable>
             <v-card v-if="reserve !== null">
                 <v-card-text class="pa-4 pb-2">
-                    <div class="subtitle-1 font-weight-black mb-1">{{ reserve.display.name }}</div>
+                    <div class="text-subtitle-1 font-weight-black mb-1">{{ reserve.display.name }}</div>
                     <div class="sub-text">{{ reserve.display.channelName }}</div>
                     <div class="sub-text" style="cursor: pointer" v-on:click="gotoGuide">
                         {{ reserve.display.day }}({{ reserve.display.dow }}) {{ reserve.display.startTime }} ~ {{ reserve.display.endTime }} ({{ reserve.display.duration }}m)
@@ -18,7 +18,7 @@
                 </v-card-text>
                 <div class="pa-2">
                     <div class="d-flex justify-end">
-                        <v-btn color="blue darken-1" text v-on:click="dialogModel = false">閉じる</v-btn>
+                        <v-btn color="blue-darken-1" variant="text" v-on:click="dialogModel = false">閉じる</v-btn>
                     </div>
                 </div>
             </v-card>
@@ -33,10 +33,10 @@ import { ReserveStateData } from '@/model/state/reserve/IReserveStateUtil';
 import { ISettingStorageModel } from '@/model/storage/setting/ISettingStorageModel';
 import DateUtil from '@/util/DateUtil';
 import Util from '@/util/Util';
-import { Component, Prop, Vue, Watch } from 'vue-property-decorator';
+import { Component, Prop, Vue, Watch, toNative } from 'vue-facing-decorator';
 
 @Component({})
-export default class ReserveDialog extends Vue {
+class ReserveDialog extends Vue {
     @Prop({ required: true })
     public isOpen!: boolean;
 
@@ -126,15 +126,17 @@ export default class ReserveDialog extends Vue {
         }
     }
 }
+
+export default toNative(ReserveDialog);
 </script>
 
 <style lang="sass" scoped>
-.theme--light.v-card
+.v-theme--light.v-card
     .v-card__text
         color: rgba(0, 0, 0, 0.87)
     .sub-text
         color: rgba(0, 0, 0, 0.54)
-.theme--dark.v-card
+.v-theme--dark.v-card
     .v-card__text
         color: white
 

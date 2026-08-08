@@ -17,6 +17,7 @@ export default class SettingStorageModel extends AbstractStorageBaseModel<ISetti
             isForceDarkTheme: false,
             isHalfWidthDisplayed: true,
             isOnAirTabListView: true,
+            channelGroupingType: 'region',
             isPreferredPlayingLiveM2TSOnWeb: true,
             onAirM2TSViewURLScheme: null,
             guideMode: UaUtil.isiOS() === true ? 'all' : 'sequential',
@@ -45,6 +46,18 @@ export default class SettingStorageModel extends AbstractStorageBaseModel<ISetti
             isCheckDeleteOriginalAfterEncode: false,
             rulesLength: 24,
             isForceEnableSubtitleStroke: true,
+            isEnableJikkyoComment: true,
+            jikkyoServerUrl: 'https://nx-jikkyo.tsukumijima.net',
+            jikkyoLiveOffsetSec: 0,
+            nextUpPanelTab: 'latest',
+            isEnableNextUpAutoPlayForLatestTab: false,
+            isShowRecordedAsSeries: false,
+            isShowFollowingIndicatorInGuide: true,
+            useDictionaryEpisodeTitle: true,
+            isEnableDataBroadcasting: false,
+            isOpenWatchSidePanel: true,
+            watchSidePanelTab: 'program',
+            pinnedChannelIds: [],
         };
     }
 

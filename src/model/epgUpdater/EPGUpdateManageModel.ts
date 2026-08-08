@@ -1,5 +1,4 @@
-/* eslint-disable no-case-declarations */
-import EventSource from 'eventsource';
+import { EventSource } from 'eventsource';
 import { EventEmitter } from 'events';
 import { IncomingMessage } from 'http';
 import { inject, injectable } from 'inversify';
@@ -7,11 +6,15 @@ import mirakurun from 'mirakurun';
 import * as mapid from '../../../node_modules/mirakurun/api';
 import IChannelDB from '../db/IChannelDB';
 import IChannelTypeIndex from '../db/IChannelTypeHash';
-import IProgramDB from '../db/IProgramDB';
+import IProgramDB, { ProgramKeepOption } from '../db/IProgramDB';
 import IConfiguration from '../IConfiguration';
 import ILogger from '../ILogger';
 import ILoggerModel from '../ILoggerModel';
 import IMirakurunClientModel from '../IMirakurunClientModel';
+import { resolveEndAt } from '../../util/ProgramDuration';
+import { formatDurationUndefinedChange, formatLogDuration, formatTimeChange } from '../../util/ProgramTimeLog';
+import Program from '../../db/entities/Program';
+import { detectOnAirPrograms, OnAirDetectResult } from './OnAirProgramDetector';
 import IEPGUpdateManageModel, {
     ProgramBaseEvent,
     UpdateEvent,
@@ -21,6 +24,14 @@ import IEPGUpdateManageModel, {
     EPGUpdateEvent,
     TunerServerType,
 } from './IEPGUpdateManageModel';
+
+// EIT[p/f] 追従ログの対象 (検出結果 + 元の番組情報)
+type OnAirLogTarget = OnAirDetectResult<{
+    channelId: number;
+    startAt: number;
+    duration: number;
+    source: mapid.Program;
+}>;
 
 @injectable()
 class EPGUpdateManageModel extends EventEmitter implements IEPGUpdateManageModel {
@@ -35,6 +46,9 @@ class EPGUpdateManageModel extends EventEmitter implements IEPGUpdateManageModel
     // 放送局索引情報
     private channelIndex: IChannelTypeIndex = {};
 
+    // ログ表示用の放送局名索引 (channelId -> 放送局名)
+    private channelNameIndex: { [channelId: number]: string } = {};
+
     // 除外放送局索引情報
     private excludeChannelIndex: { [channelId: number]: boolean } = {};
     private excludeSidIndex: { [serviceId: number]: boolean } = {};
@@ -44,6 +58,7 @@ class EPGUpdateManageModel extends EventEmitter implements IEPGUpdateManageModel
     private updatedOnAirServiceIds: { [serviceId: mapid.ServiceId]: boolean } = {};
     private updateServiceIds: { [serviceId: mapid.ServiceId]: boolean } = {};
     private mirakurunPath: string;
+    private configuration: IConfiguration;
 
     constructor(
         @inject('ILoggerModel') loggerModel: ILoggerModel,
@@ -59,6 +74,7 @@ class EPGUpdateManageModel extends EventEmitter implements IEPGUpdateManageModel
         this.mirakurunClient = mirakurunClientModel.getClient();
         this.channelDB = channelDB;
         this.programDB = programDB;
+        this.configuration = configuration;
 
         // 除外放送局索引情報のセット
         const config = configuration.getConfig();
@@ -107,12 +123,14 @@ class EPGUpdateManageModel extends EventEmitter implements IEPGUpdateManageModel
 
         this.log.system.debug(`Filtered and retrieved ${insertPrograms.length} program(s).`);
         this.log.system.info('start update programs');
-        await this.programDB.insert(this.channelIndex, insertPrograms).catch(err => {
-            this.log.system.error('update programs error');
-            this.log.system.error(err);
-            clearTimeout(timeout);
-            throw err;
-        });
+        await this.programDB
+            .insert(this.channelIndex, insertPrograms, [], this.createProgramKeepOption())
+            .catch(err => {
+                this.log.system.error('update programs error');
+                this.log.system.error(err);
+                clearTimeout(timeout);
+                throw err;
+            });
         this.log.system.info('done update programs');
 
         clearTimeout(timeout);
@@ -193,6 +211,7 @@ class EPGUpdateManageModel extends EventEmitter implements IEPGUpdateManageModel
 
         // 放送局索引作成
         this.channelIndex = {};
+        this.channelNameIndex = {};
         this.updateChannelIndex(services);
     }
 
@@ -214,6 +233,8 @@ class EPGUpdateManageModel extends EventEmitter implements IEPGUpdateManageModel
                 type: service.channel[0].type,
                 channel: service.channel[0].channel,
             };
+            // ログで放送局を判別できるようにする
+            this.channelNameIndex[service.id] = service.name;
         }
     }
 
@@ -507,6 +528,24 @@ class EPGUpdateManageModel extends EventEmitter implements IEPGUpdateManageModel
                         updateValues: updateValues.length,
                     });
 
+                    // 追加/更新された番組
+                    const changed = [...insertValues, ...updateValues];
+
+                    // EIT[p/f] 相当 (現在放送中 / 直後に始まる) の変更を抽出する。
+                    // 視聴画面の番組情報や番組表の即時更新と、追従状況のログ出力に使う
+                    const onAirTargets = detectOnAirPrograms(
+                        changed.map(p => ({
+                            channelId: this.channelIndex[p.networkId]?.[p.serviceId]?.id ?? 0,
+                            startAt: p.startAt,
+                            duration: p.duration,
+                            source: p,
+                        })),
+                        { now: new Date().getTime() },
+                    ).filter(t => t.program.channelId !== 0);
+
+                    // 変更前の時刻をログに併記するため、DB 更新の前に現在値を控える
+                    const oldPrograms = await this.getProgramsForOnAirLog(onAirTargets);
+
                     await this.programDB.update(this.channelIndex, {
                         insert: insertValues,
                         update: updateValues,
@@ -514,7 +553,20 @@ class EPGUpdateManageModel extends EventEmitter implements IEPGUpdateManageModel
                     });
                     this.log.system.info('update program db done');
 
-                    this.emit(EPGUpdateEvent.PROGRAM_UPDATED);
+                    // EPG 追従の記録 (§4.10 事前マッピングキャッシュのトリガーに利用)
+                    this.logOnAirProgramUpdate(onAirTargets, oldPrograms);
+
+                    this.emit(
+                        EPGUpdateEvent.PROGRAM_UPDATED,
+                        changed.map(p => p.id),
+                    );
+
+                    const onAirChannelIds = [...new Set(onAirTargets.map(t => t.program.channelId))].sort(
+                        (a, b) => a - b,
+                    );
+                    if (onAirChannelIds.length > 0) {
+                        this.emit(EPGUpdateEvent.ON_AIR_PROGRAM_UPDATED, onAirChannelIds);
+                    }
                 }
             } else {
                 // 整理した結果のEventをキューへ戻す
@@ -534,11 +586,111 @@ class EPGUpdateManageModel extends EventEmitter implements IEPGUpdateManageModel
     }
 
     /**
-     * 現在時刻より古い番組情報を削除
+     * EIT[p/f] 追従ログ用に、更新前の番組情報を取得する
+     * @param targets: OnAirLogTarget[] ログ対象
+     * @return Promise<{ [programId: number]: Program }> 取得できたものだけ
+     */
+    private async getProgramsForOnAirLog(targets: OnAirLogTarget[]): Promise<{ [programId: number]: Program }> {
+        const result: { [programId: number]: Program } = {};
+        if (targets.length === 0 || targets.length > EPGUpdateManageModel.ON_AIR_LOG_LIMIT) {
+            return result;
+        }
+
+        for (const target of targets) {
+            const programId = target.program.source.id;
+            try {
+                const old = await this.programDB.findId(programId);
+                if (old !== null) {
+                    result[programId] = old;
+                }
+            } catch (err: any) {
+                // ログ用途なので取得できなくても処理は続ける
+                this.log.system.debug(`get old program error for log: ${programId}`);
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * EIT[p/f] (現在放送中 / 次の番組) の更新内容をログへ出す。
+     * 開始・終了時刻は変更前 -> 変更後の形で併記する
+     * @param targets: OnAirLogTarget[] ログ対象
+     * @param oldPrograms: { [programId: number]: Program } 更新前の番組情報
+     */
+    private logOnAirProgramUpdate(targets: OnAirLogTarget[], oldPrograms: { [programId: number]: Program }): void {
+        if (targets.length === 0) {
+            return;
+        }
+
+        if (targets.length > EPGUpdateManageModel.ON_AIR_LOG_LIMIT) {
+            this.log.system.info(
+                `EIT[p/f] update: ${targets.length} program(s) on ` +
+                    `${new Set(targets.map(t => t.program.channelId)).size} channel(s)` +
+                    ` (details are omitted over ${EPGUpdateManageModel.ON_AIR_LOG_LIMIT})`,
+            );
+
+            return;
+        }
+
+        for (const target of targets) {
+            const program = target.program.source;
+            const old = oldPrograms[program.id] ?? null;
+            const channelName = this.channelNameIndex[target.program.channelId] ?? 'unknown';
+            const messages = [
+                `EIT[p/f] ${target.section}${old === null ? ' new' : ''}:`,
+                `channel: ${channelName} (${target.program.channelId})`,
+                `programId: ${program.id}`,
+                `eventId: ${program.eventId}`,
+                `name: ${program.name ?? ''}`,
+                `start: ${formatTimeChange(old === null ? null : old.startAt, program.startAt)}`,
+                `end: ${formatTimeChange(old === null ? null : old.endAt, resolveEndAt(program.startAt, program.duration))}`,
+                `duration: ${formatLogDuration(program.duration)}`,
+            ];
+
+            // 放送終了時刻が未定になった / 確定したことを明示する
+            const durationNote = formatDurationUndefinedChange(old === null ? null : old.duration, program.duration);
+            if (durationNote !== null) {
+                messages.push(durationNote);
+            }
+
+            this.log.system.info(messages.join(' '));
+        }
+    }
+
+    /**
+     * 全件更新時に残す過去番組の条件を作る
+     * @return ProgramKeepOption
+     */
+    private createProgramKeepOption(): ProgramKeepOption {
+        const config = this.configuration.getConfig();
+        const retentionTime = typeof config.epgRetentionTime === 'number' ? config.epgRetentionTime : 0;
+        const now = new Date().getTime();
+
+        return {
+            now: now,
+            retentionThreshold: retentionTime < 0 ? null : now - retentionTime * 60 * 60 * 1000,
+        };
+    }
+
+    /**
+     * 保存期間を過ぎた過去の番組情報を削除する
+     * config.yml の epgRetentionTime (時間) より前に終了した番組が対象。
+     * epgRetentionTime が負数の場合は無期限保存として何もしない
      */
     public async deleteOldPrograms(): Promise<void> {
+        // 設定はホットリロードされるため実行時に読み直す
+        const config = this.configuration.getConfig();
+        const retentionTime = typeof config.epgRetentionTime === 'number' ? config.epgRetentionTime : 0;
+        if (retentionTime < 0) {
+            this.log.system.debug('skip delete old program db (epgRetentionTime is unlimited)');
+
+            return;
+        }
+
+        const threshold = new Date().getTime() - retentionTime * 60 * 60 * 1000;
         this.log.system.info('delete old program db start');
-        await this.programDB.deleteOld(new Date().getTime());
+        await this.programDB.deleteOld(threshold);
         this.log.system.info('delete old program db done');
     }
 
@@ -696,6 +848,10 @@ namespace EPGUpdateManageModel {
     // event stream の開始文字列
     export const START_STRING = Buffer.from([0x5b, 0x0a]);
     export const DATA_DELIMITER_STRING = Buffer.from([0x7d, 0x0a, 0x2c, 0x0a]);
+
+    // EIT[p/f] の追従ログを 1 回の更新で出す上限。
+    // 全件更新直後などは対象が数百件になるため、超えたら件数だけを残す
+    export const ON_AIR_LOG_LIMIT = 30;
 }
 
 export default EPGUpdateManageModel;

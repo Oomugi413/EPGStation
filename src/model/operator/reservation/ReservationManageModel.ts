@@ -5,6 +5,8 @@ import Channel from '../../../db/entities/Channel';
 import Program from '../../../db/entities/Program';
 import Reserve from '../../../db/entities/Reserve';
 import DateUtil from '../../../util/DateUtil';
+import { isDurationUndefined } from '../../../util/ProgramDuration';
+import { formatDurationUndefinedChange, formatLogDuration, formatTimeChange } from '../../../util/ProgramTimeLog';
 import StrUtil from '../../../util/StrUtil';
 import Util from '../../../util/Util';
 import IChannelDB from '../../db/IChannelDB';
@@ -515,6 +517,8 @@ class ReservationManageModel implements IReservationManageModel {
         reserve.channelType = program.channelType;
         reserve.startAt = program.startAt;
         reserve.endAt = program.endAt;
+        // 放送終了時刻が未定なら endAt は暫定値。画面で注意喚起するために保持する
+        reserve.isTimeUndefined = isDurationUndefined(program.duration);
         reserve.name = program.name;
         reserve.shortName = program.shortName;
         reserve.halfWidthName = program.halfWidthName;
@@ -670,6 +674,23 @@ class ReservationManageModel implements IReservationManageModel {
         newReserve.updateTime = oldReserve.updateTime;
         newReserve.isConflict = false;
         newReserve.isEventRelay = oldReserve.isEventRelay;
+
+        // EPG 追従による再スケジュールを記録する (変更前後の時刻を併記する)
+        if (oldReserve.startAt !== newReserve.startAt || oldReserve.endAt !== newReserve.endAt) {
+            const messages = [
+                `reschedule reservation: ${reserveId}`,
+                `programId: ${oldReserve.programId}`,
+                `name: ${newReserve.name}`,
+                `start: ${formatTimeChange(oldReserve.startAt, newReserve.startAt)}`,
+                `end: ${formatTimeChange(oldReserve.endAt, newReserve.endAt)}`,
+                `duration: ${formatLogDuration(newProgram.duration)}`,
+            ];
+            const durationNote = formatDurationUndefinedChange(null, newProgram.duration);
+            if (durationNote !== null) {
+                messages.push(durationNote);
+            }
+            this.log.system.info(messages.join(' '));
+        }
 
         // 新旧の予約での差分を生成
         const diff = await this.createDiff(
@@ -1229,6 +1250,56 @@ class ReservationManageModel implements IReservationManageModel {
     }
 
     /**
+     * EIT[p/f] (現在放送中 / 直後に始まる番組) の更新を予約へ即時反映する。
+     *
+     * 予約の再スケジュールは通常 epgUpdateIntervalTime 周期の updateAll でしか行われないため、
+     * 前番組の延長・短縮で開始時刻が変わっても最大でその間隔だけ反映が遅れ、録画開始に間に合わないことがある。
+     * ここでは対象の放送局の直近の予約だけを更新するので、10 秒周期で呼ばれても負荷は小さい
+     * @param channelIds: apid.ChannelId[] EIT[p/f] の更新があった放送局
+     */
+    public async updateOnAirReserves(channelIds: apid.ChannelId[]): Promise<void> {
+        if (channelIds.length === 0) {
+            return;
+        }
+
+        const targetChannelIds = new Set(channelIds);
+        const now = new Date().getTime();
+
+        // 録画中 / 直後に始まる予約を拾う (EIT[p/f] の following 相当より少し広く取る)
+        const reserves = await this.reserveDB
+            .findTimeRanges({
+                times: [
+                    {
+                        startAt: now,
+                        endAt: now + ReservationManageModel.ON_AIR_RESERVE_WINDOW,
+                    },
+                ],
+                hasSkip: false,
+                hasConflict: true,
+                hasOverlap: false,
+            })
+            .catch(err => {
+                this.log.system.error('get on air reserves error');
+                this.log.system.error(err);
+
+                return [] as Reserve[];
+            });
+
+        for (const reserve of reserves) {
+            // 時刻指定予約は番組情報を持たないため追従の対象外
+            if (reserve.programId === null || targetChannelIds.has(reserve.channelId) === false) {
+                continue;
+            }
+
+            // 変更が無ければ update() 内で早期 return されるためログは抑制する
+            await this.update(reserve.id, true).catch(err => {
+                this.log.system.error(`update on air reservation error: ${reserve.id}`);
+                this.log.system.error(err);
+            });
+        }
+    }
+
+    /**
      * 予約キャンセル
      * 手動予約の場合は削除
      * ルール予約の場合は除外
@@ -1758,6 +1829,10 @@ namespace ReservationManageModel {
     export const REMOVE_SKIP_RESERVE_PRIORITY = 2;
     export const REMOVE_OVERLAP_RESERVE_PRIORITY = 2;
     export const EDIT_RESERVE_PRIORITY = 2;
+
+    // EIT[p/f] の更新で追従させる予約の範囲 (現在時刻からの先読み時間)。
+    // OnAirProgramDetector の following 判定 (10 分) より少し広く取る
+    export const ON_AIR_RESERVE_WINDOW = 15 * 60 * 1000;
 }
 
 export default ReservationManageModel;

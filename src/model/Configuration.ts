@@ -3,6 +3,8 @@ import { inject, injectable } from 'inversify';
 import * as yaml from 'js-yaml';
 import * as path from 'path';
 import urljoin from 'url-join';
+import EncodePresets from '../util/EncodePresets';
+import { mergeConfigOverlay, sanitizeConfigOverlay } from './config/ConfigOverlay';
 import IConfigFile from './IConfigFile';
 import IConfiguration from './IConfiguration';
 import ILogger from './ILogger';
@@ -15,11 +17,18 @@ import ILoggerModel from './ILoggerModel';
 @injectable()
 class Configuration implements IConfiguration {
     private templateConfig: IConfigFile | null = null;
+    // config.yml をそのまま読んだ値 (ファイルが正)
+    private fileConfig!: IConfigFile;
+    // GUI から編集された差分を重ねた実効値
     private config!: IConfigFile;
+    // DB (app_setting の config キー) から読み込んだ差分
+    private overlay: Record<string, unknown> = {};
     private log: ILogger;
 
     constructor(@inject('ILoggerModel') logger: ILoggerModel) {
         this.log = logger.getLogger();
+        this.ensureConfigFile();
+        this.ensureEncodeScript();
 
         try {
             this.templateConfig = this.readConfig(Configuration.CONFIG_TEMPLATE_FILE_PATH, true);
@@ -27,19 +36,86 @@ class Configuration implements IConfiguration {
             this.templateConfig = null;
         }
 
-        this.config = this.readConfig(Configuration.CONFIG_FILE_PATH, false);
+        this.fileConfig = this.readConfig(Configuration.CONFIG_FILE_PATH, false);
+        this.config = this.fileConfig;
         this.log.system.info('config.yml read success');
 
         fs.watchFile(Configuration.CONFIG_FILE_PATH, async () => {
             this.log.system.info('updated config file');
             try {
                 const newConfig = <any>yaml.load(await fs.promises.readFile(Configuration.CONFIG_FILE_PATH, 'utf-8'));
-                this.config = this.formatConfig(newConfig);
+                this.fileConfig = this.formatConfig(newConfig);
+                // 手編集で config.yml が変わっても GUI の差分は維持する
+                this.applyOverlay();
             } catch (err: any) {
                 this.log.system.error('read config error');
                 this.log.system.error(err);
             }
         });
+    }
+
+    /**
+     * config.yml が存在しない場合はプラットフォーム別テンプレートから生成する。
+     * 既存ファイルは上書きせず、同時起動時の EEXIST も正常として扱う。
+     */
+    private ensureConfigFile(): void {
+        if (fs.existsSync(Configuration.CONFIG_FILE_PATH)) {
+            return;
+        }
+
+        this.log.system.warn(
+            `${Configuration.CONFIG_FILE_PATH} is not found. Generating from ${Configuration.CONFIG_TEMPLATE_FILE_PATH}.`,
+        );
+
+        try {
+            fs.mkdirSync(path.dirname(Configuration.CONFIG_FILE_PATH), { recursive: true });
+            fs.copyFileSync(
+                Configuration.CONFIG_TEMPLATE_FILE_PATH,
+                Configuration.CONFIG_FILE_PATH,
+                fs.constants.COPYFILE_EXCL,
+            );
+            this.log.system.info(
+                `Config file generated at ${Configuration.CONFIG_FILE_PATH} from ${Configuration.CONFIG_TEMPLATE_FILE_PATH}.`,
+            );
+        } catch (error: unknown) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code === 'EEXIST' && fs.existsSync(Configuration.CONFIG_FILE_PATH)) {
+                this.log.system.info(`Config file already generated at ${Configuration.CONFIG_FILE_PATH}.`);
+                return;
+            }
+
+            this.log.system.fatal(`Failed to generate config file from template: ${String(error)}`);
+            throw error;
+        }
+    }
+
+    /**
+     * 生成した config.yml の既定のエンコード設定は config/enc.js を参照しているため、
+     * これも同梱のテンプレートから用意しておく。
+     * 無くても起動はできる (エンコードを実行したときに失敗する) ので、失敗しても警告に留める
+     */
+    private ensureEncodeScript(): void {
+        const target = Configuration.ENCODE_SCRIPT_PATH;
+        if (fs.existsSync(target) === true) {
+            return;
+        }
+
+        const template = `${target}.template`;
+        if (fs.existsSync(template) === false) {
+            return;
+        }
+
+        try {
+            fs.copyFileSync(template, target, fs.constants.COPYFILE_EXCL);
+            this.log.system.info(`encode script generated at ${target} from ${template}.`);
+        } catch (error: unknown) {
+            if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+                // 他プロセスが先に作成した (正常)
+                return;
+            }
+            this.log.system.warn(`failed to generate encode script from ${template}`);
+            this.log.system.warn(error);
+        }
     }
 
     /**
@@ -49,49 +125,24 @@ class Configuration implements IConfiguration {
      * @return IConfigFile
      */
     private readConfig(configPath: string, isWarning: boolean): IConfigFile {
-        let str: string = '';
+        let str: string;
         try {
-            // 設定ファイルを読み込む
             str = fs.readFileSync(configPath, 'utf-8');
-        } catch (e: any) {
-            if (e.code === 'ENOENT') {
-                // 設定ファイルが存在しない場合、テンプレートから生成
-                const errMsg = `${configPath} is not found. Generating from template.`;
-                if (isWarning) {
-                    this.log.system.warn(errMsg);
-                } else {
-                    this.log.system.fatal(errMsg);
-                }
-
-                // テンプレートから生成
-                try {
-                    fs.copyFileSync(Configuration.CONFIG_TEMPLATE_FILE_PATH, configPath);
-                    this.log.system.info(`Config file generated at ${configPath} from template.`);
-                    str = fs.readFileSync(configPath, 'utf-8'); // 再度設定ファイルを読み込み
-                } catch (copyError) {
-                    this.log.system.fatal(`Failed to generate config file from template: ${copyError}`);
-                    process.exit(1);
-                }
+        } catch (error: unknown) {
+            if (isWarning) {
+                this.log.system.warn(error);
             } else {
-                // 他のエラーが発生した場合
-                if (isWarning) {
-                    this.log.system.warn(e);
-                } else {
-                    this.log.system.fatal(e);
-                }
-
-                // warning 扱いの場合はエラーを throw する
-                if (isWarning) {
-                    throw e;
-                } else {
-                    process.exit(1);
-                }
+                this.log.system.fatal(error);
             }
+            throw error;
         }
-        // 設定ファイルの内容をパース
-        const newConfig: IConfigFile = <any>yaml.load(str);
 
-        return this.formatConfig(newConfig);
+        const loadedConfig: unknown = yaml.load(str);
+        if (typeof loadedConfig !== 'object' || loadedConfig === null) {
+            throw new Error(`${configPath} does not contain a valid configuration object.`);
+        }
+
+        return this.formatConfig(loadedConfig as IConfigFile);
     }
 
     /**
@@ -144,6 +195,9 @@ class Configuration implements IConfiguration {
 
         // streamfiles のパス整形
         newConfig.streamFilePath = this.directoryFormatting(newConfig.streamFilePath);
+
+        // encodePresets からの encode / stream.profiles 自動生成 (手書きの設定があればそちらを優先する)
+        EncodePresets.applyToConfig(newConfig);
 
         return newConfig;
     }
@@ -220,10 +274,57 @@ class Configuration implements IConfiguration {
     public getConfig(): IConfigFile {
         return JSON.parse(JSON.stringify(this.config));
     }
+
+    /**
+     * config.yml をそのまま読んだ値を返す (GUI で「ファイルの値」を見せるために使う)
+     * @return IConfigFile
+     */
+    public getFileConfig(): IConfigFile {
+        return JSON.parse(JSON.stringify(this.fileConfig));
+    }
+
+    /**
+     * 現在適用している差分を返す
+     * @return Record<string, unknown>
+     */
+    public getOverlay(): Record<string, unknown> {
+        return JSON.parse(JSON.stringify(this.overlay));
+    }
+
+    /**
+     * GUI から編集された差分を適用する。
+     * DB から読み込んだ直後と、設定が更新されたときに呼ばれる
+     * @param overlay: unknown
+     */
+    public setOverlay(overlay: unknown): void {
+        this.overlay = sanitizeConfigOverlay(overlay);
+        this.applyOverlay();
+    }
+
+    /**
+     * config.yml + 差分から実効値を組み立て直す。
+     * 差分にはテンプレート由来の既定値補完も効かせるため formatConfig を通す
+     */
+    private applyOverlay(): void {
+        if (Object.keys(this.overlay).length === 0) {
+            this.config = this.fileConfig;
+
+            return;
+        }
+        try {
+            this.config = this.formatConfig(mergeConfigOverlay(this.fileConfig, this.overlay));
+        } catch (err: any) {
+            // 差分が壊れていても config.yml だけで動作を続ける (画面から設定を直せる状態を保つ)
+            this.log.system.error('failed to apply config overlay');
+            this.log.system.error(err);
+            this.config = this.fileConfig;
+        }
+    }
 }
 
 namespace Configuration {
     export const CONFIG_FILE_PATH = path.join(__dirname, '..', '..', 'config', 'config.yml');
+    export const ENCODE_SCRIPT_PATH = path.join(__dirname, '..', '..', 'config', 'enc.js');
     export const CONFIG_TEMPLATE_FILE_PATH =
         process.platform === 'win32'
             ? path.join(__dirname, '..', '..', 'config', 'config-win.yml.template')
@@ -231,12 +332,14 @@ namespace Configuration {
     export const ROOT_PATH = path.join(__dirname, '..', '..').replace(new RegExp(`\\${path.sep}$`), '');
 
     export const DEFAULT_VALUE: IConfigFile = {
+        featureFlags: {},
         mirakurunPath: 'http+unix://%2Fvar%2Frun%2Fmirakurun.sock/',
         apiServers: [],
         isAllowAllCORS: false,
         dbtype: 'sqlite',
         needToReplaceEnclosingCharacters: true,
         epgUpdateIntervalTime: 10,
+        epgRetentionTime: 0,
         conflictPriority: 1,
         recPriority: 2,
         streamingPriority: 0,
@@ -251,6 +354,11 @@ namespace Configuration {
             },
         ],
         recordedHistoryRetentionPeriodDays: 90,
+        importDirs: [],
+        importDefaultMode: 'register',
+        importFileNamePatterns: [],
+        importWatch: false,
+        importWatchIntervalSec: 300,
         storageLimitCheckIntervalTime: 60,
         thumbnail: path.join(__dirname, '..', '..', 'thumbnail'),
         thumbnailCmd:
@@ -262,7 +370,8 @@ namespace Configuration {
         isEnabledDropCheck: false,
         ffmpeg: '/usr/local/bin/ffmpeg',
         ffprobe: '/usr/local/bin/ffprobe',
-        encodeProcessNum: 0,
+        encodeProcessNum: 1,
+        streamProcessNum: 4,
         concurrentEncodeNum: 0,
         encode: [],
         isSuppressReservesUpdateAllLog: false,

@@ -1,10 +1,11 @@
 import { inject, injectable } from 'inversify';
 import { FindOptionsWhere, In, LessThan, LessThanOrEqual, MoreThan, MoreThanOrEqual, ObjectLiteral } from 'typeorm';
-import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
+import type { QueryDeepPartialEntity } from 'typeorm';
 import * as apid from '../../../api';
 import * as mapid from '../../../node_modules/mirakurun/api';
 import Program from '../../db/entities/Program';
 import DateUtil from '../../util/DateUtil';
+import { resolveEndAt } from '../../util/ProgramDuration';
 import StrUtil from '../../util/StrUtil';
 import IConfigFile from '../IConfigFile';
 import IConfiguration from '../IConfiguration';
@@ -20,6 +21,7 @@ import IProgramDB, {
     FindScheduleOption,
     ProgramUpdateValues,
     ProgramWithOverlap,
+    ProgramKeepOption,
 } from './IProgramDB';
 
 interface FindQuery {
@@ -37,6 +39,9 @@ interface KeywordOption {
 
 @injectable()
 export default class ProgramDB implements IProgramDB {
+    // 次の番組を探すときに放送中の番組から先読みする時間 (ms)
+    private static readonly NEXT_PROGRAM_SEARCH_TIME = 4 * 60 * 60 * 1000;
+
     private log: ILogger;
     private config: IConfigFile;
     private op: IDBOperator;
@@ -64,6 +69,7 @@ export default class ProgramDB implements IProgramDB {
         channelTypes: IChannelTypeIndex,
         programs: mapid.Program[],
         deleteChannelIds: mapid.ServiceId[] = [],
+        keepOption?: ProgramKeepOption,
     ): Promise<void> {
         const updateTime = new Date().getTime();
         const values: QueryDeepPartialEntity<Program>[] = [];
@@ -86,8 +92,25 @@ export default class ProgramDB implements IProgramDB {
         let hasError = false;
         try {
             // 削除
-            const deleteOption = deleteChannelIds.length === 0 ? {} : { channelId: In(deleteChannelIds) };
-            await queryRunner.manager.delete(Program, deleteOption);
+            if (deleteChannelIds.length === 0) {
+                if (typeof keepOption === 'undefined') {
+                    await queryRunner.manager.createQueryBuilder().delete().from(Program).execute();
+                } else {
+                    // 過去の番組表データを残す設定の場合、保存期間内に終了した番組は削除しない
+                    // (Mirakurun は終了した番組を返さないため、全件削除すると保存期間の指定が意味を持たなくなる)
+                    const builder = queryRunner.manager
+                        .createQueryBuilder()
+                        .delete()
+                        .from(Program)
+                        .where('endAt >= :now', { now: keepOption.now });
+                    if (keepOption.retentionThreshold !== null) {
+                        builder.orWhere('endAt < :threshold', { threshold: keepOption.retentionThreshold });
+                    }
+                    await builder.execute();
+                }
+            } else {
+                await queryRunner.manager.delete(Program, { channelId: In(deleteChannelIds) });
+            }
 
             // 挿入処理
             for (const value of values) {
@@ -96,7 +119,7 @@ export default class ProgramDB implements IProgramDB {
 
             await queryRunner.commitTransaction();
         } catch (err: any) {
-            console.error(err);
+            this.log.system.error(err);
             hasError = true;
             await queryRunner.rollbackTransaction();
         } finally {
@@ -179,7 +202,9 @@ export default class ProgramDB implements IProgramDB {
             serviceId: program.serviceId,
             networkId: program.networkId,
             startAt: program.startAt,
-            endAt: program.startAt + program.duration,
+            // 放送時間未定 (duration が 1) の番組は暫定の終了時刻を入れる。
+            // そのまま startAt + 1 にすると放送開始直後に「終了済み」となり一覧から消えるため
+            endAt: resolveEndAt(program.startAt, program.duration),
             startHour: jaDate.getHours(),
             week: jaDate.getDay(),
             duration: program.duration,
@@ -336,7 +361,7 @@ export default class ProgramDB implements IProgramDB {
 
             await queryRunner.commitTransaction();
         } catch (err: any) {
-            console.error(err);
+            this.log.system.error(err);
             hasError = true;
             await queryRunner.rollbackTransaction();
         } finally {
@@ -1104,10 +1129,14 @@ export default class ProgramDB implements IProgramDB {
         const connection = await this.op.getConnection();
         const repository = connection.getRepository(Program);
 
+        // 次の番組も必要な場合は、放送中の番組の後ろに続く番組も拾えるよう startAt の上限を広げる
+        // (放送局ごとに現在番組の終了時刻が違うため、時間範囲で取ってから呼び出し側で必要な数へ切り詰める)
+        const startAtLimit = option.includeNextProgram === true ? time + ProgramDB.NEXT_PROGRAM_SEARCH_TIME : time;
+
         return await this.promieRetry.run(() => {
             return repository.find({
                 where: {
-                    startAt: LessThanOrEqual(time),
+                    startAt: LessThanOrEqual(startAtLimit),
                     endAt: MoreThanOrEqual(time),
                 },
                 order: {

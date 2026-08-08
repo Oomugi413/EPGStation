@@ -77,6 +77,9 @@ export default class ChannelModel implements IChannelModel {
             channelType: item.channelType,
             channel: item.channelType,
             type: item.type,
+            region: item.region,
+            // 系列情報 (地上波系のみ)。落とすと系列別のまとめ・系列局一覧が空になる
+            affiliation: item.affiliation,
         };
     }
 

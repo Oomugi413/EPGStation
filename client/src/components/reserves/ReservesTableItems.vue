@@ -1,15 +1,15 @@
 <template>
     <div>
         <v-card class="mx-auto reserves-table" max-width="1600px">
-            <v-simple-table>
+            <v-table>
                 <template v-slot:default>
                     <thead>
                         <tr>
-                            <th class="channel">放送局</th>
+                            <th v-if="isMobile === false" class="channel">放送局</th>
                             <th class="day">日付</th>
                             <th class="time">時間</th>
                             <th>番組名</th>
-                            <th>内容</th>
+                            <th v-if="isMobile === false">内容</th>
                             <th class="menu"></th>
                         </tr>
                     </thead>
@@ -20,43 +20,52 @@
                             v-bind:class="{ 'selected-color': reserve.isSelected === true }"
                             v-on:click="clickItem(reserve)"
                         >
-                            <td>{{ reserve.display.channelName }}</td>
+                            <td v-if="isMobile === false">{{ reserve.display.channelName }}</td>
                             <td>{{ reserve.display.day }}({{ reserve.display.dow }})</td>
                             <td>
-                                {{ reserve.display.startTime }}~{{ reserve.display.endTime }}
+                                {{ reserve.display.startTime }}~<span v-bind:class="{ 'text-error font-weight-bold': reserve.reserveItem.isTimeUndefined === true }">{{ reserve.display.endTime }}</span>
                                 <div>({{ reserve.display.duration }}m)</div>
                             </td>
                             <td>
                                 <v-icon v-if="reserve.display.isRule === true" class="reserve-icon">mdi-calendar</v-icon>
                                 <v-icon v-else class="reserve-icon">mdi-timer-outline</v-icon>
                                 {{ reserve.display.name }}
+                                <div v-if="isMobile === true" class="text-caption text-medium-emphasis">{{ reserve.display.channelName }}</div>
+                                <ReserveScheduleStatus :reserveItem="reserve.reserveItem" class="d-block mt-1"></ReserveScheduleStatus>
                             </td>
-                            <td>{{ reserve.display.description }}</td>
+                            <td v-if="isMobile === false">{{ reserve.display.description }}</td>
                             <td>
                                 <ReserveMenu v-if="isEditMode === false" :reserveItem="reserve.reserveItem" :disableEdit="false"></ReserveMenu>
                             </td>
                         </tr>
                     </tbody>
                 </template>
-            </v-simple-table>
+            </v-table>
         </v-card>
-        <ReserveDialog :isOpen.sync="isOpenDialog" :reserve="dialogReserve"></ReserveDialog>
+        <ReserveDialog v-model:isOpen="isOpenDialog" :reserve="dialogReserve"></ReserveDialog>
     </div>
 </template>
 
 <script lang="ts">
 import ReserveDialog from '@/components/reserves/ReserveDialog.vue';
 import ReserveMenu from '@/components/reserves/ReserveMenu.vue';
+import ReserveScheduleStatus from '@/components/reserves/ReserveScheduleStatus.vue';
 import { ReserveStateData } from '@/model/state/reserve/IReserveStateUtil';
-import { Component, Prop, Vue } from 'vue-property-decorator';
+import { Component, Prop, Vue, toNative } from 'vue-facing-decorator';
 
 @Component({
     components: {
         ReserveMenu,
         ReserveDialog,
+        ReserveScheduleStatus,
     },
 })
-export default class ReservesTableItems extends Vue {
+class ReservesTableItems extends Vue {
+    // スマホ・タブレットでは放送局・内容列を隠し、番組名の下にまとめて表示する
+    get isMobile(): boolean {
+        return this.$vuetify.display.smAndDown;
+    }
+
     @Prop({
         required: true,
     })
@@ -79,6 +88,8 @@ export default class ReservesTableItems extends Vue {
         this.isOpenDialog = true;
     }
 }
+
+export default toNative(ReservesTableItems);
 </script>
 
 <style lang="sass" scoped>

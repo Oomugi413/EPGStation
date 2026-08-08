@@ -18,7 +18,7 @@
                                     ></RecordedsmallCard>
                                 </div>
                                 <div v-if="recordingState.getTotal() > recordingState.getRecorded().length" class="my-2">
-                                    <v-btn text block color="primary mx-auto" v-on:click="gotoNextPage('/recording')">more</v-btn>
+                                    <v-btn variant="text" block color="primary" class="mx-auto" v-on:click="gotoNextPage('/recording')">more</v-btn>
                                 </div>
                             </div>
                         </template>
@@ -36,21 +36,23 @@
                                     ></RecordedsmallCard>
                                 </div>
                                 <div v-if="recordedState.getTotal() > recordedState.getRecorded().length" class="my-2">
-                                    <v-btn text block color="primary mx-auto" v-on:click="gotoNextPage('/recorded')">more</v-btn>
+                                    <v-btn variant="text" block color="primary" class="mx-auto" v-on:click="gotoNextPage('/recorded')">more</v-btn>
                                 </div>
                             </div>
                         </template>
                     </DashboardItem>
-                    <DashboardItem ref="reserveItem" :title="reserveTitle" :bage.sync="reserveConflictCnt" v-on:scroll="onReserveScroll" v-on:bage="gotoConflicts">
+                    <DashboardItem ref="reserveItem" :title="reserveTitle" v-model:bage="reserveConflictCnt" v-on:scroll="onReserveScroll" v-on:bage="gotoConflicts">
                         <template v-slot:items>
                             <div>
                                 <ReservesCard :reserves="reservesState.getReserves()" :flat="true" :isEditMode="false"></ReservesCard>
                                 <div v-if="reservesState.getTotal() > reservesState.getReserves().length" class="px-2 pb-2">
-                                    <v-btn text block color="primary mx-auto" v-on:click="gotoNextPage('/reserves')">more</v-btn>
+                                    <v-btn variant="text" block color="primary" class="mx-auto" v-on:click="gotoNextPage('/reserves')">more</v-btn>
                                 </div>
                             </div>
                         </template>
                     </DashboardItem>
+                    <DashboardStorageCard v-if="isShowStorageCard"></DashboardStorageCard>
+                    <DashboardMissingEpisodeCard v-if="isShowMissingEpisodeCard"></DashboardMissingEpisodeCard>
                 </div>
             </transition>
         </div>
@@ -59,10 +61,13 @@
 
 <script lang="ts">
 import DashboardItem from '@/components/dashboard/DashboardItem.vue';
+import DashboardMissingEpisodeCard from '@/components/dashboard/DashboardMissingEpisodeCard.vue';
+import DashboardStorageCard from '@/components/dashboard/DashboardStorageCard.vue';
 import RecordedsmallCard from '@/components/recorded/RecordedSmallCard.vue';
 import ReservesCard from '@/components/reserves/ReservesCard.vue';
 import TitleBar from '@/components/titleBar/TitleBar.vue';
 import container from '@/model/ModelContainer';
+import IServerConfigModel from '@/model/serverConfig/IServerConfigModel';
 import ISocketIOModel from '@/model/socketio/ISocketIOModel';
 import IDashboardState from '@/model/state/dashboard/IDashboardState';
 import IScrollPositionState from '@/model/state/IScrollPositionState';
@@ -72,11 +77,12 @@ import IReservesState from '@/model/state/reserve/IReservesState';
 import ISnackbarState from '@/model/state/snackbar/ISnackbarState';
 import IVersionState from '@/model/state/version/IVersionState';
 import { ISettingStorageModel, ISettingValue } from '@/model/storage/setting/ISettingStorageModel';
+import { isFeatureEnabled } from '@/util/FeatureFlags';
 import UaUtil from '@/util/UaUtil';
 import Util from '@/util/Util';
 import ResizeObserver from 'resize-observer-polyfill';
-import { Component, Vue, Watch } from 'vue-property-decorator';
-import { Route } from 'vue-router';
+import { Component, Vue, Watch, toNative } from 'vue-facing-decorator';
+import type { RouteLocationNormalized as Route } from 'vue-router';
 import * as apid from '../../../api';
 
 interface ScrollData {
@@ -85,7 +91,6 @@ interface ScrollData {
     reserveScroll: number;
 }
 
-Component.registerHooks(['beforeRouteUpdate', 'beforeRouteLeave']);
 
 @Component({
     components: {
@@ -93,6 +98,8 @@ Component.registerHooks(['beforeRouteUpdate', 'beforeRouteLeave']);
         DashboardItem,
         ReservesCard,
         RecordedsmallCard,
+        DashboardStorageCard,
+        DashboardMissingEpisodeCard,
     },
 })
 class Dashboard extends Vue {
@@ -103,16 +110,18 @@ class Dashboard extends Vue {
     public reservesState: IReservesState = container.get<IReservesState>('IReservesState');
 
     private setting: ISettingStorageModel = container.get<ISettingStorageModel>('ISettingStorageModel');
-    private settingValue: ISettingValue | null = null;
+    public settingValue: ISettingValue | null = null;
     private scrollState: IScrollPositionState = container.get<IScrollPositionState>('IScrollPositionState');
     private snackbarState: ISnackbarState = container.get<ISnackbarState>('ISnackbarState');
     private socketIoModel: ISocketIOModel = container.get<ISocketIOModel>('ISocketIOModel');
-    private versionState: IVersionState = container.get<IVersionState>('IVersionState');
+    private serverConfigModel: IServerConfigModel = container.get<IServerConfigModel>('IServerConfigModel');
+    public versionState: IVersionState = container.get<IVersionState>('IVersionState');
     private onUpdateStatusCallback = (async (): Promise<void> => {
-        await this.dashboardState.fetchData();
-        await this.recordingState.fetchData(this.createFetchRecordingDataOption());
-        await this.recordedState.fetchData(this.createFetchRecordedDataOption());
-        await this.reservesState.fetchData(this.createFetchReserveDataOption());
+        try {
+            await this.fetchAllData();
+        } catch (err) {
+            console.error(err);
+        }
     }).bind(this);
     private recordingScroll: number = 0;
     private recordedScroll: number = 0;
@@ -134,6 +143,20 @@ class Dashboard extends Vue {
 
     get reserveConflictCnt(): number {
         return this.dashboardState.getConflictCnt();
+    }
+
+    /**
+     * ストレージ使用状況カードを表示するか (featureFlags.dashboard 連動)
+     */
+    get isShowStorageCard(): boolean {
+        return this.dashboardState.isEnabled();
+    }
+
+    /**
+     * 録り逃しアラートカードを表示するか (featureFlags.dashboard かつ featureFlags.seriesLibrary が必要)
+     */
+    get isShowMissingEpisodeCard(): boolean {
+        return this.dashboardState.isEnabled() === true && isFeatureEnabled(this.serverConfigModel.getConfig(), 'seriesLibrary') === true;
     }
 
     get dashboardClass(): any {
@@ -202,7 +225,7 @@ class Dashboard extends Vue {
         element.style.overflow = '';
     }
 
-    public beforeDestroy(): void {
+    public beforeUnmount(): void {
         // socket.io イベント
         this.socketIoModel.offUpdateState(this.onUpdateStatusCallback);
 
@@ -296,7 +319,7 @@ class Dashboard extends Vue {
     /**
      * ページ更新時に呼ばれる
      */
-    public beforeRouteUpdate(to: Route, from: Route, next: () => void): void {
+    public handleBeforeRouteUpdate(to: Route, from: Route, next: () => void): void {
         this.saveScrollPosition();
         next();
     }
@@ -304,7 +327,7 @@ class Dashboard extends Vue {
     /**
      * ページ離脱時に呼ばれる
      */
-    public beforeRouteLeave(to: Route, from: Route, next: () => void): void {
+    public handleBeforeRouteLeave(to: Route, from: Route, next: () => void): void {
         this.saveScrollPosition();
         next();
     }
@@ -333,34 +356,7 @@ class Dashboard extends Vue {
             this.reservesState.clearDate();
 
             this.$nextTick(async () => {
-                await this.dashboardState.fetchData().catch(err => {
-                    this.snackbarState.open({
-                        color: 'error',
-                        text: '予約情報取得に失敗',
-                    });
-                    console.error(err);
-                });
-                await this.recordingState.fetchData(this.createFetchRecordingDataOption()).catch(err => {
-                    this.snackbarState.open({
-                        color: 'error',
-                        text: '録画中データ取得に失敗',
-                    });
-                    console.error(err);
-                });
-                await this.recordedState.fetchData(this.createFetchRecordedDataOption()).catch(err => {
-                    this.snackbarState.open({
-                        color: 'error',
-                        text: '録画済みデータ取得に失敗',
-                    });
-                    console.error(err);
-                });
-                await this.reservesState.fetchData(this.createFetchReserveDataOption()).catch(err => {
-                    this.snackbarState.open({
-                        color: 'error',
-                        text: '予約データ取得に失敗',
-                    });
-                    console.error(err);
-                });
+                await this.fetchAllData();
 
                 this.isShow = true;
 
@@ -373,13 +369,13 @@ class Dashboard extends Vue {
                         const position = this.scrollState.getScrollData<ScrollData>();
                         if (position !== null) {
                             if (typeof this.$refs.recordingItem !== 'undefined') {
-                                (this.$refs.recordingItem as DashboardItem).setScrollTop(position.recordingScroll);
+                                (this.$refs.recordingItem as InstanceType<typeof DashboardItem>).setScrollTop(position.recordingScroll);
                             }
                             if (typeof this.$refs.recordedItem !== 'undefined') {
-                                (this.$refs.recordedItem as DashboardItem).setScrollTop(position.recordedScroll);
+                                (this.$refs.recordedItem as InstanceType<typeof DashboardItem>).setScrollTop(position.recordedScroll);
                             }
                             if (typeof this.$refs.reserveItem !== 'undefined') {
-                                (this.$refs.reserveItem as DashboardItem).setScrollTop(position.reserveScroll);
+                                (this.$refs.reserveItem as InstanceType<typeof DashboardItem>).setScrollTop(position.reserveScroll);
                             }
                         }
 
@@ -387,6 +383,61 @@ class Dashboard extends Vue {
                     }
                 });
             });
+        });
+    }
+
+    /**
+     * 録画中・録画済み・予約情報をまとめて取得する
+     * featureFlags.dashboard が有効な場合は集約 API (`GET /api/dashboard`) から 1 リクエストで取得し、
+     * その結果を各 State (recordingState/recordedState/reservesState) にそのまま反映する (個別 API は呼ばない)
+     * 無効時、もしくは集約 API 取得に失敗した場合は従来通り個別 API から取得する (フォールバック)
+     */
+    private async fetchAllData(): Promise<void> {
+        if (this.settingValue === null) {
+            throw new Error('SettingValueIsNull');
+        }
+
+        const isHalfWidth = this.settingValue.isHalfWidthDisplayed;
+        const limit = Math.min(50, Math.max(1, this.settingValue.recordingLength, this.settingValue.recordedLength, this.settingValue.reservesLength));
+
+        await this.dashboardState.fetchData(isHalfWidth, limit).catch(err => {
+            this.snackbarState.open({
+                color: 'error',
+                text: '予約情報取得に失敗',
+            });
+            console.error(err);
+        });
+
+        const data = this.dashboardState.getData();
+        if (data !== null) {
+            this.recordingState.setData(data.recording, isHalfWidth);
+            this.recordedState.setData(data.recentlyRecorded, isHalfWidth);
+            this.reservesState.setData(data.upcomingReserves, isHalfWidth);
+
+            return;
+        }
+
+        // フォールバック: 機能フラグ無効時 (または集約 API 失敗時) は個別 API から取得する
+        await this.recordingState.fetchData(this.createFetchRecordingDataOption()).catch(err => {
+            this.snackbarState.open({
+                color: 'error',
+                text: '録画中データ取得に失敗',
+            });
+            console.error(err);
+        });
+        await this.recordedState.fetchData(this.createFetchRecordedDataOption()).catch(err => {
+            this.snackbarState.open({
+                color: 'error',
+                text: '録画済みデータ取得に失敗',
+            });
+            console.error(err);
+        });
+        await this.reservesState.fetchData(this.createFetchReserveDataOption()).catch(err => {
+            this.snackbarState.open({
+                color: 'error',
+                text: '予約データ取得に失敗',
+            });
+            console.error(err);
         });
     }
 
@@ -463,7 +514,14 @@ namespace Dashboard {
     export const MIN_MIDTH_OF_SIDE_BY_SIDE = 1023;
 }
 
-export default Dashboard;
+export default Object.assign(toNative(Dashboard), {
+    beforeRouteUpdate(this: Dashboard, to: Route, from: Route, next: () => void): void {
+            this.handleBeforeRouteUpdate(to, from, next);
+        },
+    beforeRouteLeave(this: Dashboard, to: Route, from: Route, next: () => void): void {
+            this.handleBeforeRouteLeave(to, from, next);
+        },
+});
 </script>
 
 <style lang="sass" scoped>
@@ -479,10 +537,12 @@ export default Dashboard;
 
         .dashboard
             display: flex
+            flex-wrap: wrap
             position: absolute
             top: 0
             height: 100%
             width: 100%
+            overflow-y: auto
 
             .dash-board-item
                 width: 33.3%

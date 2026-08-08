@@ -80,6 +80,10 @@ components:
             description: 録画 tag id
             type: integer
 
+        SavedSearchId:
+            description: 保存検索 id
+            type: integer
+
         EncodeId:
             description: エンコード id
             type: integer
@@ -213,6 +217,78 @@ components:
                     description: 無変換か
                     type: boolean
 
+        StreamContainer:
+            description: 配信コンテナ種別
+            type: string
+            enum:
+                - m2ts
+                - m2tsll
+                - mp4
+                - webm
+                - hls
+
+        StreamVideoParam:
+            description: 配信プリセットの映像設定
+            type: object
+            properties:
+                codec:
+                    type: string
+                width:
+                    type: integer
+                height:
+                    type: integer
+                bitrate:
+                    description: kbps
+                    type: integer
+
+        StreamAudioParam:
+            description: 配信プリセットの音声設定
+            type: object
+            properties:
+                codec:
+                    type: string
+                bitrate:
+                    description: kbps
+                    type: integer
+
+        ClientStreamProfile:
+            description: クライアントへ公開する id ベースの配信プリセット情報 (cmd は含まない)
+            type: object
+            required:
+                - id
+                - name
+                - container
+            properties:
+                id:
+                    type: string
+                name:
+                    type: string
+                container:
+                    $ref: '#/components/schemas/StreamContainer'
+                video:
+                    $ref: '#/components/schemas/StreamVideoParam'
+                audio:
+                    $ref: '#/components/schemas/StreamAudioParam'
+                isUnconverted:
+                    description: 無変換か
+                    type: boolean
+
+        ClientEncodePreset:
+            description: クライアントへ公開する id ベースのエンコードプリセット情報 (cmd は含まない)
+            type: object
+            required:
+                - id
+                - name
+            properties:
+                id:
+                    type: string
+                name:
+                    type: string
+                video:
+                    $ref: '#/components/schemas/StreamVideoParam'
+                audio:
+                    $ref: '#/components/schemas/StreamAudioParam'
+
         Config:
             description: コンフィグ
             type: object
@@ -222,7 +298,7 @@ components:
                 - recorded
                 - encode
                 - urlscheme
-                - isEnableLiveStream
+                - isEnableTSLiveStream
                 - isEnableTSRecordedStream
                 - isEnableEncodedRecordedStream
             properties:
@@ -370,7 +446,7 @@ components:
                             $ref: '#/components/schemas/URLSchemeInfo'
                         download:
                             $ref: '#/components/schemas/URLSchemeInfo'
-                isEnableLiveStream:
+                isEnableTSLiveStream:
                     description: ライブ視聴が有効か
                     type: boolean
                 isEnableTSRecordedStream:
@@ -454,11 +530,75 @@ components:
                                             type: array
                                             items:
                                                 type: string
+                streamProfiles:
+                    description: id ベースの配信プリセット情報 (新形式)。streamConfig と併存する
+                    type: object
+                    properties:
+                        live:
+                            description: ライブ配信の配信プリセット一覧
+                            type: array
+                            items:
+                                $ref: '#/components/schemas/ClientStreamProfile'
+                        recorded:
+                            description: 録画配信の配信プリセット一覧
+                            type: object
+                            properties:
+                                ts:
+                                    description: 録画済み TS ファイルの配信プリセット一覧
+                                    type: array
+                                    items:
+                                        $ref: '#/components/schemas/ClientStreamProfile'
+                                encoded:
+                                    description: 録画エンコード済みファイルの配信プリセット一覧
+                                    type: array
+                                    items:
+                                        $ref: '#/components/schemas/ClientStreamProfile'
+                encodePresets:
+                    description: id ベースのエンコードプリセット情報 (新形式)。encode と併存する
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/ClientEncodePreset'
                 kodiHosts:
                     description: kodi hosts
                     type: array
                     items:
                         type: string
+                featureFlags:
+                    $ref: '#/components/schemas/FeatureFlags'
+                importDirs:
+                    description: 外部録画ファイル取り込みが許可されたディレクトリ名一覧 (featureFlags.externalFileImport が有効な場合のみ意味を持つ)
+                    type: array
+                    items:
+                        type: string
+
+        FeatureFlags:
+            description: 段階導入用の機能フラグ。クライアントはこれを見て機能の表示可否を判断する
+            type: object
+            properties:
+                watchHistory:
+                    type: boolean
+                notifications:
+                    type: boolean
+                dashboard:
+                    type: boolean
+                systemSettings:
+                    type: boolean
+                seriesLibrary:
+                    type: boolean
+                metadataProviders:
+                    type: boolean
+                programSeriesMapping:
+                    type: boolean
+                annictSync:
+                    type: boolean
+                nextUpPanel:
+                    type: boolean
+                externalFileImport:
+                    type: boolean
+                advancedSearch:
+                    type: boolean
+                updateNotification:
+                    type: boolean
 
         ChannelItems:
             type: array
@@ -499,6 +639,46 @@ components:
                     type: string
                 type:
                     type: number
+                region:
+                    $ref: '#/components/schemas/BroadcastRegionItem'
+                affiliation:
+                    $ref: '#/components/schemas/BroadcastAffiliationItem'
+
+        BroadcastRegionItem:
+            description: 地上デジタル放送の地域
+            type: object
+            required:
+                - id
+                - name
+                - order
+            properties:
+                id:
+                    description: 地域 id
+                    type: string
+                name:
+                    description: 地域表示名
+                    type: string
+                order:
+                    description: 表示順 (都道府県コード。判定不能な「その他」は 99)
+                    type: number
+
+        BroadcastAffiliationItem:
+            description: 地上デジタル放送の系列 (BIT の系列識別ベース)
+            type: object
+            required:
+                - id
+                - name
+                - order
+            properties:
+                id:
+                    description: 系列 id
+                    type: string
+                name:
+                    description: 系列表示名
+                    type: string
+                order:
+                    description: 表示順 (独立系は 90、未分類は 99)
+                    type: number
 
         ScheduleChannleItem:
             description: 番組表の放送局データ
@@ -529,6 +709,10 @@ components:
                     $ref: '#/components/schemas/ChannelType'
                 type:
                     type: number
+                region:
+                    $ref: '#/components/schemas/BroadcastRegionItem'
+                affiliation:
+                    $ref: '#/components/schemas/BroadcastAffiliationItem'
 
         ScheduleProgramItem:
             description: 番組表の番組データ
@@ -548,6 +732,9 @@ components:
                     $ref: '#/components/schemas/UnixtimeMS'
                 endAt:
                     $ref: '#/components/schemas/UnixtimeMS'
+                isDurationUndefined:
+                    description: 放送時間未定 (ARIB の duration = 0xFFFFFF) の番組か。true の場合 endAt は暫定値
+                    type: boolean
                 isFree:
                     description: 無料放送か
                     type: boolean
@@ -1110,6 +1297,12 @@ components:
                     type: boolean
                 isTimeSpecified:
                     type: boolean
+                isTimeUndefined:
+                    type: boolean
+                    description: 放送終了時刻が未定か (true なら endAt は暫定値)
+                isFollowingSchedule:
+                    type: boolean
+                    description: 前番組の延長などで番組開始を待っている (EIT[p/f] 追従中) か
                 tags:
                     type: array
                     items:
@@ -1284,6 +1477,9 @@ components:
                     $ref: '#/components/schemas/ProgramId'
                 channelId:
                     $ref: '#/components/schemas/ChannelId'
+                channelName:
+                    description: 録画時点の放送局名 (channel から放送局情報が失われた場合の表示用)
+                    type: string
                 startAt:
                     $ref: '#/components/schemas/UnixtimeMS'
                 endAt:
@@ -1418,6 +1614,275 @@ components:
                 size:
                     description: ファイルサイズ
                     type: integer
+                watchHistory:
+                    description: 視聴履歴 (featureFlags.watchHistory が有効な場合のみ含まれる)
+                    allOf:
+                        - $ref: '#/components/schemas/WatchHistory'
+                duration:
+                    description: ffprobe で実測した動画長 (秒)
+                    type: number
+                startTime:
+                    description: コンテナの開始オフセット (秒)
+                    type: number
+                startAt:
+                    description: 録画ファイル先頭 (再生位置 0 秒) に対応する実時刻
+                    allOf:
+                        - $ref: '#/components/schemas/UnixtimeMS'
+                videoCodec:
+                    description: 映像コーデック
+                    type: string
+                audioCodec:
+                    description: 音声コーデック
+                    type: string
+                width:
+                    description: 映像の横解像度
+                    type: integer
+                height:
+                    description: 映像の縦解像度
+                    type: integer
+                bitRate:
+                    description: ビットレート (bps)
+                    type: number
+
+        VideoFileMetadataResult:
+            description: 録画ファイルの実測メタデータ
+            type: object
+            required:
+                - videoFileId
+                - duration
+                - startTime
+                - startAt
+                - videoCodec
+                - audioCodec
+                - width
+                - height
+                - bitRate
+                - size
+            properties:
+                videoFileId:
+                    $ref: '#/components/schemas/VideoFileId'
+                duration:
+                    description: 実測した動画長 (秒)
+                    type: number
+                    nullable: true
+                startTime:
+                    description: コンテナの開始オフセット (秒)
+                    type: number
+                    nullable: true
+                startAt:
+                    description: 録画ファイル先頭に対応する実時刻
+                    type: integer
+                    nullable: true
+                videoCodec:
+                    type: string
+                    nullable: true
+                audioCodec:
+                    type: string
+                    nullable: true
+                width:
+                    type: integer
+                    nullable: true
+                height:
+                    type: integer
+                    nullable: true
+                bitRate:
+                    type: number
+                    nullable: true
+                size:
+                    description: ファイルサイズ
+                    type: integer
+
+        VideoFileMetadataStatus:
+            description: 録画ファイルのメタデータ解析状況
+            type: object
+            required: [total, analyzed, unanalyzed]
+            properties:
+                total:
+                    description: 録画ファイル総数
+                    type: integer
+                analyzed:
+                    description: 解析済み件数
+                    type: integer
+                unanalyzed:
+                    description: 未解析件数
+                    type: integer
+
+        AnalyzeVideoFilesOption:
+            description: 録画ファイルメタデータ一括解析オプション
+            type: object
+            properties:
+                limit:
+                    description: 一度に解析する上限件数 (省略時 100 件)
+                    type: integer
+                    minimum: 1
+                    maximum: 1000
+
+        AnalyzeVideoFilesResult:
+            description: 録画ファイルメタデータ一括解析結果
+            type: object
+            required: [analyzed, failed, remaining]
+            properties:
+                analyzed:
+                    description: 解析に成功した件数
+                    type: integer
+                failed:
+                    description: 解析に失敗した件数
+                    type: integer
+                remaining:
+                    description: 残りの未解析件数
+                    type: integer
+
+        ReanalyzeTsInfoOption:
+            description: 録画ファイル TS 情報の強制再解析オプション (解析済みファイルも対象に含める)
+            type: object
+            properties:
+                offset:
+                    description: 開始位置 (id 昇順、省略時 0)。前回の結果の nextOffset をそのまま渡す
+                    type: integer
+                    minimum: 0
+                limit:
+                    description: 一度に解析する上限件数 (省略時 100 件)
+                    type: integer
+                    minimum: 1
+                    maximum: 1000
+
+        ReanalyzeTsInfoResult:
+            description: 録画ファイル TS 情報の強制再解析結果
+            type: object
+            required: [analyzed, failed, nextOffset, total]
+            properties:
+                analyzed:
+                    description: 解析に成功した件数
+                    type: integer
+                failed:
+                    description: 解析に失敗した件数
+                    type: integer
+                nextOffset:
+                    description: 次回に渡す offset。すべて処理し終えた場合は null
+                    type: integer
+                    nullable: true
+                total:
+                    description: 対象となる TS ファイルの総数
+                    type: integer
+
+        StartVideoAnalyzeJobOption:
+            description: 録画ファイル一括解析ジョブの開始オプション
+            type: object
+            required: [type]
+            properties:
+                type:
+                    description: 解析の種別 (metadata = ffprobe / tsInfo = TS の PSI/SI / channel = 保存済みの TS 解析結果から放送局を反映)
+                    type: string
+                    enum: [metadata, tsInfo, channel]
+                mode:
+                    description: 対象 (unanalyzed = 未解析のみ / all = 解析済みを含む全件。省略時 unanalyzed)
+                    type: string
+                    enum: [unanalyzed, all]
+                recordedId:
+                    description: 指定するとその録画のファイルだけを対象にする (省略時は全件。解析済みでも必ずやり直す)
+                    type: integer
+
+        VideoAnalyzeJob:
+            description: 録画ファイル一括解析ジョブの状況
+            type: object
+            required: [status, type, mode, total, processed, analyzed, failed, startedAt, finishedAt, error]
+            properties:
+                status:
+                    type: string
+                    enum: [idle, running, succeeded, failed, canceled]
+                type:
+                    type: string
+                    nullable: true
+                    enum: [metadata, tsInfo, channel]
+                mode:
+                    type: string
+                    nullable: true
+                    enum: [unanalyzed, all]
+                recordedId:
+                    description: 対象を 1 録画に絞っている場合の録画 id
+                    type: integer
+                    nullable: true
+                total:
+                    description: 開始時点の対象件数
+                    type: integer
+                processed:
+                    description: 処理済み件数 (成功 + 失敗)
+                    type: integer
+                analyzed:
+                    description: 解析に成功した件数
+                    type: integer
+                failed:
+                    description: 解析に失敗した件数
+                    type: integer
+                startedAt:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UnixtimeMS'
+                finishedAt:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UnixtimeMS'
+                error:
+                    description: ジョブ自体が中断した場合の理由
+                    type: string
+                    nullable: true
+
+        DashboardData:
+            type: object
+            required: [recording, recentlyRecorded, upcomingReserves, reserveCounts]
+            properties:
+                recording: { $ref: '#/components/schemas/Records' }
+                recentlyRecorded: { $ref: '#/components/schemas/Records' }
+                upcomingReserves: { $ref: '#/components/schemas/Reserves' }
+                reserveCounts: { $ref: '#/components/schemas/ReserveCnts' }
+
+        WatchStatus:
+            type: string
+            enum: [unwatched, watching, watched]
+        WatchHistory:
+            type: object
+            required: [videoFileId, recordedId, position, duration, status, updatedAt]
+            properties:
+                videoFileId: { $ref: '#/components/schemas/VideoFileId' }
+                recordedId: { $ref: '#/components/schemas/RecordedId' }
+                position: { type: integer, minimum: 0 }
+                duration: { type: integer, minimum: 1 }
+                status: { $ref: '#/components/schemas/WatchStatus' }
+                updatedAt: { $ref: '#/components/schemas/UnixtimeMS' }
+        WatchHistoryRecord:
+            description: 視聴履歴 1 件 (対象の録画情報付き)
+            type: object
+            required: [videoFileId, recordedId, position, duration, status, updatedAt, recorded]
+            properties:
+                videoFileId: { $ref: '#/components/schemas/VideoFileId' }
+                recordedId: { $ref: '#/components/schemas/RecordedId' }
+                position: { type: integer, minimum: 0 }
+                duration: { type: integer, minimum: 0 }
+                status: { $ref: '#/components/schemas/WatchStatus' }
+                updatedAt: { $ref: '#/components/schemas/UnixtimeMS' }
+                recorded:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/RecordedItem'
+
+        WatchHistoryRecords:
+            description: 視聴履歴一覧
+            type: object
+            required: [records, total]
+            properties:
+                records:
+                    type: array
+                    items: { $ref: '#/components/schemas/WatchHistoryRecord' }
+                total:
+                    type: integer
+
+        UpdatePlaybackPositionOption:
+            type: object
+            required: [position, duration]
+            additionalProperties: false
+            properties:
+                position: { type: number, minimum: 0 }
+                duration: { type: number, exclusiveMinimum: 0 }
 
         VideoFileDuration:
             description: ビデオファイルの長さ
@@ -1466,6 +1931,10 @@ components:
                 color:
                     description: 色
                     type: string
+                parentId:
+                    description: 親タグの id (階層タグ用)
+                    type: integer
+                    nullable: true
 
         RecordedTags:
             description: 録画タグ情報
@@ -1495,6 +1964,10 @@ components:
                 color:
                     description: 色
                     type: string
+                parentId:
+                    description: 親タグの id (階層タグ用)
+                    type: integer
+                    nullable: true
 
         RelateRecordedTagOption:
             description: 録画番組とタグの関連付けオプション
@@ -1513,6 +1986,91 @@ components:
             properties:
                 tagId:
                     $ref: '#/components/schemas/RecordedTagId'
+
+        SavedSearchItem:
+            description: 保存検索情報 (advancedSearch 機能フラグ有効時のみ利用可能)
+            type: object
+            required:
+                - id
+                - name
+                - query
+                - isPinned
+                - createdAt
+                - updatedAt
+            properties:
+                id:
+                    $ref: '#/components/schemas/SavedSearchId'
+                name:
+                    description: 保存検索名
+                    type: string
+                query:
+                    description: 検索条件 (JSON 文字列)
+                    type: string
+                isPinned:
+                    description: ピン留めするか
+                    type: boolean
+                createdAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+                updatedAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+
+        SavedSearchItems:
+            description: 保存検索情報一覧
+            type: object
+            required:
+                - items
+                - total
+            properties:
+                items:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/SavedSearchItem'
+                total:
+                    description: 保存検索総件数
+                    type: integer
+
+        AddSavedSearchOption:
+            description: 保存検索追加オプション
+            type: object
+            required:
+                - name
+                - query
+            properties:
+                name:
+                    description: 保存検索名
+                    type: string
+                query:
+                    description: 検索条件 (JSON 文字列)
+                    type: string
+                isPinned:
+                    description: ピン留めするか
+                    type: boolean
+
+        UpdateSavedSearchOption:
+            description: 保存検索更新オプション
+            type: object
+            required:
+                - name
+                - query
+            properties:
+                name:
+                    description: 保存検索名
+                    type: string
+                query:
+                    description: 検索条件 (JSON 文字列)
+                    type: string
+                isPinned:
+                    description: ピン留めするか
+                    type: boolean
+
+        AddedSavedSearch:
+            description: 保存検索追加成功応答データ
+            type: object
+            required:
+                - searchId
+            properties:
+                searchId:
+                    $ref: '#/components/schemas/SavedSearchId'
 
         RecordedChannelListItem:
             description: recorded が持つ channelId のリスト
@@ -1556,6 +2114,72 @@ components:
                     items:
                         $ref: '#/components/schemas/RecordedGenreListItem'
 
+        RecordedCleanupTarget:
+            description: |
+                クリーンアップ実行時の対象指定
+                all: 録画ファイル + ドロップログファイルの両方をクリーンアップする
+                dropLogOnly: ドロップログファイルのみをクリーンアップする (録画実ファイルは削除しない)
+            type: string
+            enum:
+                - 'all'
+                - 'dropLogOnly'
+
+        RecordedCleanupOption:
+            description: クリーンアップ実行オプション
+            type: object
+            properties:
+                target:
+                    description: クリーンアップ対象 (省略時は all)
+                    allOf:
+                        - $ref: '#/components/schemas/RecordedCleanupTarget'
+
+        RecordedCleanupFileCandidates:
+            description: DB 未登録の動画実ファイルの削除候補情報
+            type: object
+            required:
+                - count
+                - sampleFilePaths
+            properties:
+                count:
+                    description: 削除候補件数
+                    type: integer
+                sampleFilePaths:
+                    description: 代表ファイルパス (先頭数件)
+                    type: array
+                    items:
+                        type: string
+                totalSize:
+                    description: 削除候補の合計サイズ (byte)
+                    type: integer
+
+        RecordedCleanupDropLogCandidates:
+            description: DB 未登録のドロップログファイルの削除候補情報
+            type: object
+            required:
+                - count
+                - sampleFilePaths
+            properties:
+                count:
+                    description: 削除候補件数
+                    type: integer
+                sampleFilePaths:
+                    description: 代表ファイルパス (先頭数件)
+                    type: array
+                    items:
+                        type: string
+
+        RecordedCleanupInfo:
+            description: クリーンアップ削除候補情報 (dry-run 結果)
+            type: object
+            required:
+                - videoFiles
+                - dropLogs
+            properties:
+                videoFiles:
+                    $ref: '#/components/schemas/RecordedCleanupFileCandidates'
+                dropLogs:
+                    $ref: '#/components/schemas/RecordedCleanupDropLogCandidates'
+
         SendVideoLinkToKodiOption:
             description: kodiへビデオリンクを送信するときのオプション
             type: object
@@ -1570,13 +2194,14 @@ components:
             description: ビデオファイルをアップロード
             type: object
             required:
-                - recordedId
                 - parentDirectoryName
                 - viewName
                 - fileType
             properties:
                 recordedId:
-                    $ref: '#/components/schemas/RecordedId'
+                    description: 紐付ける録画番組。省略した場合は TS を解析して番組情報を自動作成する (fileType が ts のときのみ)
+                    allOf:
+                        - $ref: '#/components/schemas/RecordedId'
                 parentDirectoryName:
                     description: 親保存ディレクトリ
                     type: string
@@ -1592,8 +2217,258 @@ components:
                     type: string
                     format: binary
                 localFilePath:
-                    description: アップロードファイルのローカルパス
+                    description: サーバー上のファイルパス。file の代わりに指定する。config.importDirs 配下のファイルのみ許可され、指定したファイルは録画ディレクトリへ移動される
                     type: string
+
+        UploadVideoFileResult:
+            description: ビデオファイルのアップロード結果
+            type: object
+            required: [recordedId]
+            properties:
+                recordedId:
+                    description: 紐付けた録画番組 (自動作成した場合は新しい id)
+                    allOf:
+                        - $ref: '#/components/schemas/RecordedId'
+
+        ImportMode:
+            description: 外部録画ファイル取り込みモード。register は元ファイルを移動せず登録のみ行う。move は録画ディレクトリへ移動する
+            type: string
+            enum:
+                - register
+                - move
+
+        ImportDuplicateAction:
+            description: 重複する録画が見つかった場合の挙動。skip は取り込まない。add は既存録画に video file を追加する。newRecorded は別録画として新規登録する
+            type: string
+            enum:
+                - skip
+                - add
+                - newRecorded
+
+        ImportScanOption:
+            description: 外部録画ファイル取り込みのディレクトリスキャンオプション
+            type: object
+            required:
+                - importDirName
+            properties:
+                importDirName:
+                    description: config.importDirs で定義したディレクトリ名
+                    type: string
+                subPath:
+                    description: importDirName 配下のサブパス (省略時はルート)
+                    type: string
+                recursive:
+                    description: サブディレクトリも走査するか (既定 true)
+                    type: boolean
+                analyze:
+                    description: TS 解析・重複判定を行い番組情報を推定するか (既定 true)。false ならファイルの列挙だけを行う (アップロード時のファイル選択用)
+                    type: boolean
+
+        ImportScanResultItem:
+            description: スキャンで見つかった取り込み候補ファイル 1 件分
+            type: object
+            required:
+                - filePath
+                - fileName
+                - hasProgramTxt
+                - hasErr
+            properties:
+                filePath:
+                    description: 実ファイルパス (importDirs 配下であることを検証済み)
+                    type: string
+                fileName:
+                    description: ファイル名
+                    type: string
+                size:
+                    description: ファイルサイズ (byte)
+                    type: integer
+                estimatedName:
+                    description: ファイル名/program.txt から推定した番組名
+                    type: string
+                estimatedChannelName:
+                    description: 推定したチャンネル名
+                    type: string
+                estimatedChannelId:
+                    $ref: '#/components/schemas/ChannelId'
+                estimatedStartAt:
+                    description: 推定した開始時刻 (UnixTime ms)
+                    type: integer
+                estimatedEndAt:
+                    description: 推定した終了時刻 (UnixTime ms)
+                    type: integer
+                estimatedSource:
+                    description: 推定に使った情報源
+                    type: string
+                    enum:
+                        - ts
+                        - programTxt
+                        - fileName
+                tsServiceName:
+                    description: TS の SDT から取得した放送局名
+                    type: string
+                tsEventName:
+                    description: TS の EIT から取得した番組名
+                    type: string
+                tsNetworkId:
+                    description: TS から取得した network id
+                    type: integer
+                tsServiceId:
+                    description: TS から取得した service id
+                    type: integer
+                hasProgramTxt:
+                    description: 同名の .program.txt が存在するか
+                    type: boolean
+                hasErr:
+                    description: 同名の .err が存在するか
+                    type: boolean
+                dropCount:
+                    description: .err から解析したドロップ数
+                    type: integer
+                scramblingCount:
+                    description: .err から解析したスクランブル数
+                    type: integer
+                duplicateRecordedIds:
+                    description: 重複していると思われる既存録画の recordedId 一覧
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/RecordedId'
+
+        ImportScanResult:
+            description: 取り込みディレクトリスキャン結果
+            type: object
+            required:
+                - items
+            properties:
+                items:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/ImportScanResultItem'
+
+        ImportRegisterItem:
+            description: 取り込み登録 1 件分のオプション
+            type: object
+            required:
+                - filePath
+                - channelId
+                - name
+                - startAt
+                - parentDirectoryName
+                - fileType
+            properties:
+                filePath:
+                    description: スキャン結果で取得した実ファイルパス
+                    type: string
+                channelId:
+                    $ref: '#/components/schemas/ChannelId'
+                name:
+                    description: 番組名
+                    type: string
+                startAt:
+                    description: 開始時刻 (UnixTime ms)
+                    type: integer
+                endAt:
+                    description: 終了時刻 (UnixTime ms、省略時は動画長から算出)
+                    type: integer
+                parentDirectoryName:
+                    description: 親保存ディレクトリ (move モードの場合のみ使用)
+                    type: string
+                subDirectory:
+                    description: 保存先サブディレクトリ (move モードの場合のみ使用)
+                    type: string
+                fileType:
+                    $ref: '#/components/schemas/VideoFileType'
+                mode:
+                    $ref: '#/components/schemas/ImportMode'
+                duplicateAction:
+                    $ref: '#/components/schemas/ImportDuplicateAction'
+                duplicateRecordedId:
+                    $ref: '#/components/schemas/RecordedId'
+                ruleId:
+                    $ref: '#/components/schemas/RuleId'
+                genre1:
+                    $ref: '#/components/schemas/ProgramGenreLv1'
+                subGenre1:
+                    $ref: '#/components/schemas/ProgramGenreLv2'
+
+        ImportRegisterOption:
+            description: 外部録画ファイル取り込み登録オプション
+            type: object
+            required:
+                - items
+            properties:
+                items:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/ImportRegisterItem'
+
+        ImportJobStartResult:
+            description: 取り込みジョブ開始結果
+            type: object
+            required:
+                - jobId
+            properties:
+                jobId:
+                    description: ジョブ id
+                    type: string
+
+        ImportJobResultItem:
+            description: 取り込みジョブ内の 1 ファイル分の結果
+            type: object
+            required:
+                - localFilePath
+                - imported
+            properties:
+                localFilePath:
+                    description: 取り込み対象のファイルパス
+                    type: string
+                imported:
+                    description: 取り込みに成功したか
+                    type: boolean
+                skipped:
+                    description: 重複によりスキップされたか
+                    type: boolean
+                recordedId:
+                    $ref: '#/components/schemas/RecordedId'
+                name:
+                    description: 作成された録画の番組名
+                    type: string
+                error:
+                    description: 失敗理由
+                    type: string
+
+        ImportJobStatus:
+            description: 取り込みジョブの進捗状況
+            type: object
+            required:
+                - jobId
+                - total
+                - done
+                - successCount
+                - failedCount
+                - isRunning
+                - results
+            properties:
+                jobId:
+                    type: string
+                total:
+                    description: 対象ファイル総数
+                    type: integer
+                done:
+                    description: 処理済み件数
+                    type: integer
+                successCount:
+                    description: 成功件数
+                    type: integer
+                failedCount:
+                    description: 失敗件数
+                    type: integer
+                isRunning:
+                    description: 実行中かどうか
+                    type: boolean
+                results:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/ImportJobResultItem'
 
         Version:
             description: バージョン情報
@@ -1603,6 +2478,114 @@ components:
             properties:
                 version:
                     type: string
+
+        Status:
+            description: 外部サービスとの接続状態
+            type: object
+            required:
+                - mirakurun
+            properties:
+                mirakurun:
+                    type: object
+                    required:
+                        - isAlive
+                        - checkedAt
+                    properties:
+                        isAlive:
+                            description: mirakurun へ接続できているか
+                            type: boolean
+                        checkedAt:
+                            description: 接続確認を行った時刻 (UnixtimeMS)
+                            type: integer
+
+        LogProcessType:
+            description: ログの出力元プロセス
+            type: string
+            enum:
+                - Operator
+                - Service
+                - EPGUpdater
+
+        LogFileItem:
+            description: ログファイル情報
+            type: object
+            required:
+                - id
+                - process
+                - category
+                - name
+                - size
+                - updatedAt
+                - isRotated
+            properties:
+                id:
+                    description: ログファイル id
+                    type: string
+                process:
+                    $ref: '#/components/schemas/LogProcessType'
+                category:
+                    description: ログのカテゴリ (system, access, stream, encode など)
+                    type: string
+                name:
+                    description: ログファイル名
+                    type: string
+                size:
+                    description: ファイルサイズ (byte)
+                    type: integer
+                updatedAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+                isRotated:
+                    description: ローテーション済みのファイルか
+                    type: boolean
+
+        LogFiles:
+            description: ログファイル一覧
+            type: object
+            required:
+                - items
+            properties:
+                items:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/LogFileItem'
+
+        LogFileContent:
+            description: ログファイルの内容
+            type: object
+            required:
+                - id
+                - process
+                - category
+                - name
+                - size
+                - updatedAt
+                - isTruncated
+                - lines
+            properties:
+                id:
+                    description: ログファイル id
+                    type: string
+                process:
+                    $ref: '#/components/schemas/LogProcessType'
+                category:
+                    description: ログのカテゴリ
+                    type: string
+                name:
+                    description: ログファイル名
+                    type: string
+                size:
+                    description: ファイルサイズ (byte)
+                    type: integer
+                updatedAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+                isTruncated:
+                    description: 先頭が省略されているか
+                    type: boolean
+                lines:
+                    description: ログの行
+                    type: array
+                    items:
+                        type: string
 
         EncodeProgramItem:
             description: エンコードプログラム情報
@@ -1743,12 +2726,31 @@ components:
                     $ref: '#/components/schemas/UnixtimeMS'
                 endAt:
                     $ref: '#/components/schemas/UnixtimeMS'
+                isDurationUndefined:
+                    description: 放送時間未定 (ARIB の duration = 0xFFFFFF) の番組か。true の場合 endAt は暫定値
+                    type: boolean
                 description:
                     description: ストリーミング番組詳細
                     type: string
                 extended:
                     description: ストリーミング番組拡張
                     type: string
+                broadcastTime:
+                    $ref: '#/components/schemas/StreamBroadcastTime'
+
+        StreamBroadcastTime:
+            description: 配信中の映像の放送時刻 (TS の TDT / TOT 由来)。実況コメントの遅延補正に使う
+            type: object
+            required:
+                - time
+                - receivedAt
+            properties:
+                time:
+                    description: TDT / TOT が示す放送時刻 (UnixTime ms)
+                    type: integer
+                receivedAt:
+                    description: その TDT / TOT をサーバが受信した時刻 (UnixTime ms)
+                    type: integer
 
         StreamInfo:
             type: object
@@ -1820,6 +2822,1727 @@ components:
                     description: 'Error'
                     type: string
 
+        SeriesId:
+            description: シリーズ id
+            type: integer
+
+        SeriesAirType:
+            description: 放送種別
+            type: string
+            enum:
+                - first
+                - rerun
+                - delayed
+                - unknown
+
+        SeriesListItem:
+            description: シリーズ一覧項目
+            type: object
+            required:
+                - id
+                - title
+                - normalizedTitle
+                - mediaType
+                - preferredChannelId
+                - updatedAt
+                - hasImage
+                - origin
+            properties:
+                origin:
+                    $ref: '#/components/schemas/SeriesOrigin'
+                id:
+                    $ref: '#/components/schemas/SeriesId'
+                title:
+                    type: string
+                normalizedTitle:
+                    type: string
+                mediaType:
+                    type: string
+                preferredChannelId:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/ChannelId'
+                updatedAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+                hasImage:
+                    description: アイキャッチ画像 (GET /api/series/{seriesId}/image) が取得できるか
+                    type: boolean
+                imageSource:
+                    description: 画像の出所 (annict = 作品辞書の画像 / thumbnail = 録画から生成したサムネイル)
+                    type: string
+                    nullable: true
+                    enum: [annict, thumbnail]
+                imageCopyright:
+                    description: 画像の著作権表記 (imageSource が annict のときのみ)
+                    type: string
+                    nullable: true
+        SeriesListResult:
+            description: シリーズ一覧
+            type: object
+            required:
+                - items
+                - total
+            properties:
+                items:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/SeriesListItem'
+                total:
+                    type: integer
+
+        SeriesRecordedRow:
+            description: シリーズに紐づく録画
+            type: object
+            required:
+                - recordedId
+                - channelId
+                - channelName
+                - recordedTitle
+                - startAt
+                - endAt
+                - episodeId
+                - seasonNumber
+                - episodeNumber
+                - episodeLabel
+                - episodeTitle
+                - airType
+                - confidence
+            properties:
+                recordedId:
+                    $ref: '#/components/schemas/RecordedId'
+                channelId:
+                    $ref: '#/components/schemas/ChannelId'
+                channelName:
+                    type: string
+                    nullable: true
+                recordedTitle:
+                    type: string
+                startAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+                endAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+                episodeId:
+                    type: integer
+                    nullable: true
+                seasonNumber:
+                    type: integer
+                    nullable: true
+                episodeNumber:
+                    type: integer
+                    nullable: true
+                episodeLabel:
+                    type: string
+                    nullable: true
+                episodeTitle:
+                    type: string
+                    nullable: true
+                airType:
+                    type: string
+                confidence:
+                    type: number
+
+        SeriesDetail:
+            description: シリーズ詳細
+            allOf:
+                - $ref: '#/components/schemas/SeriesListItem'
+                - type: object
+                  required:
+                      - externalIds
+                      - channels
+                      - continuity
+                      - recorded
+                  properties:
+                      externalIds:
+                          type: object
+                          properties:
+                              syobocalTid:
+                                  type: integer
+                                  nullable: true
+                              annictId:
+                                  type: string
+                                  nullable: true
+                              tmdbId:
+                                  type: integer
+                                  nullable: true
+                      channels:
+                          type: array
+                          items:
+                              type: object
+                              properties:
+                                  channelId:
+                                      $ref: '#/components/schemas/ChannelId'
+                                  channelName:
+                                      type: string
+                                      nullable: true
+                                  count:
+                                      type: integer
+                      continuity:
+                          type: object
+                          properties:
+                              missingEpisodes:
+                                  type: array
+                                  items:
+                                      type: object
+                                      properties:
+                                          seasonNumber:
+                                              type: integer
+                                          episodeNumber:
+                                              type: integer
+                              duplicateEpisodes:
+                                  type: array
+                                  items:
+                                      type: object
+                                      properties:
+                                          seasonNumber:
+                                              type: integer
+                                          episodeNumber:
+                                              type: integer
+                                          recordedIds:
+                                              type: array
+                                              items:
+                                                  type: integer
+                                          channelIds:
+                                              type: array
+                                              items:
+                                                  type: integer
+                              unknownEpisodeRecordedIds:
+                                  type: array
+                                  items:
+                                      type: integer
+                      recorded:
+                          type: array
+                          items:
+                              $ref: '#/components/schemas/SeriesRecordedRow'
+
+        SeriesMappingValue:
+            description: 録画のシリーズ割当情報
+            type: object
+            required:
+                - recordedId
+                - recordedTitle
+                - seriesId
+                - seriesTitle
+                - episodeId
+                - seasonNumber
+                - episodeNumber
+                - airType
+                - matchMethod
+                - confidence
+                - manualLock
+            properties:
+                recordedId:
+                    $ref: '#/components/schemas/RecordedId'
+                recordedTitle:
+                    type: string
+                seriesId:
+                    $ref: '#/components/schemas/SeriesId'
+                seriesTitle:
+                    type: string
+                episodeId:
+                    type: integer
+                    nullable: true
+                seasonNumber:
+                    type: integer
+                    nullable: true
+                episodeNumber:
+                    type: integer
+                    nullable: true
+                airType:
+                    type: string
+                matchMethod:
+                    type: string
+                confidence:
+                    type: number
+                manualLock:
+                    type: boolean
+
+        UpdateSeriesMappingOption:
+            description: シリーズ手動割当のリクエストボディ
+            type: object
+            properties:
+                seriesId:
+                    $ref: '#/components/schemas/SeriesId'
+                seriesTitle:
+                    type: string
+                seasonNumber:
+                    type: integer
+                episodeNumber:
+                    type: integer
+                    nullable: true
+                airType:
+                    $ref: '#/components/schemas/SeriesAirType'
+                learnAlias:
+                    type: boolean
+
+        BulkSeriesMappingItem:
+            description: シリーズ割当の一括更新 1 件分 (省略した項目は現在の値を維持する)
+            type: object
+            required:
+                - recordedId
+            properties:
+                recordedId:
+                    $ref: '#/components/schemas/RecordedId'
+                seasonNumber:
+                    type: integer
+                episodeNumber:
+                    type: number
+                    nullable: true
+                airType:
+                    $ref: '#/components/schemas/SeriesAirType'
+
+        BulkUpdateSeriesMappingOption:
+            description: シリーズ割当の一括更新リクエストボディ
+            type: object
+            required:
+                - items
+            properties:
+                items:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/BulkSeriesMappingItem'
+                learnAlias:
+                    description: 正規化タイトル → シリーズの対応を辞書に学習させるか (既定 false)
+                    type: boolean
+
+        BulkUpdateSeriesMappingResult:
+            description: シリーズ割当の一括更新結果
+            type: object
+            required:
+                - updated
+                - failed
+            properties:
+                updated:
+                    type: integer
+                failed:
+                    type: array
+                    items:
+                        type: object
+                        required:
+                            - recordedId
+                            - message
+                        properties:
+                            recordedId:
+                                $ref: '#/components/schemas/RecordedId'
+                            message:
+                                type: string
+
+        SeriesPendingMatchCandidate:
+            description: 未確定候補
+            type: object
+            required:
+                - seriesId
+                - seriesTitle
+                - score
+            properties:
+                seriesId:
+                    $ref: '#/components/schemas/SeriesId'
+                seriesTitle:
+                    type: string
+                score:
+                    type: number
+
+        SeriesPendingMatchItem:
+            description: 未確定キューの1件
+            type: object
+            required:
+                - id
+                - recordedId
+                - recordedTitle
+                - normalizedTitle
+                - channelId
+                - candidates
+                - createdAt
+            properties:
+                id:
+                    type: integer
+                recordedId:
+                    $ref: '#/components/schemas/RecordedId'
+                recordedTitle:
+                    type: string
+                normalizedTitle:
+                    type: string
+                channelId:
+                    $ref: '#/components/schemas/ChannelId'
+                candidates:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/SeriesPendingMatchCandidate'
+                createdAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+
+        SeriesPendingListResult:
+            description: 未確定キュー一覧
+            type: object
+            required:
+                - items
+                - total
+            properties:
+                items:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/SeriesPendingMatchItem'
+                total:
+                    type: integer
+
+        SeriesOrigin:
+            description: シリーズの出所 (dictionary = しょぼいカレンダー/Annict/Wikidata の ID を持つ, local = 録画タイトルから作られた)
+            type: string
+            enum: [dictionary, local]
+
+        SeriesMergeCandidate:
+            description: マージ候補
+            type: object
+            required:
+                - seriesId
+                - title
+                - normalizedTitle
+                - origin
+                - recordedCount
+                - matchType
+                - commonPrefixLength
+            properties:
+                seriesId:
+                    $ref: '#/components/schemas/SeriesId'
+                title:
+                    type: string
+                normalizedTitle:
+                    type: string
+                origin:
+                    $ref: '#/components/schemas/SeriesOrigin'
+                recordedCount:
+                    type: integer
+                seasonYear:
+                    type: integer
+                    nullable: true
+                seasonName:
+                    type: string
+                    nullable: true
+                    enum: [WINTER, SPRING, SUMMER, AUTUMN]
+                matchType:
+                    description: exact = 完全一致, prefix = 候補が対象で始まる, contained = 対象が候補で始まる, partial = 先頭の一部だけ一致
+                    type: string
+                    enum: [exact, prefix, contained, partial]
+                commonPrefixLength:
+                    description: 正規化タイトルの共通接頭辞の文字数
+                    type: integer
+
+        SeriesMergeCandidateResult:
+            description: マージ候補一覧
+            type: object
+            required:
+                - seriesId
+                - title
+                - normalizedTitle
+                - origin
+                - candidates
+            properties:
+                seriesId:
+                    $ref: '#/components/schemas/SeriesId'
+                title:
+                    type: string
+                normalizedTitle:
+                    type: string
+                origin:
+                    $ref: '#/components/schemas/SeriesOrigin'
+                candidates:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/SeriesMergeCandidate'
+
+        MergeSeriesOption:
+            description: シリーズマージのリクエストボディ (統合元は fromSeriesId または fromSeriesIds のどちらかで指定する)
+            type: object
+            required:
+                - toSeriesId
+            properties:
+                fromSeriesId:
+                    $ref: '#/components/schemas/SeriesId'
+                fromSeriesIds:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/SeriesId'
+                toSeriesId:
+                    $ref: '#/components/schemas/SeriesId'
+
+        MergeSeriesResult:
+            description: シリーズマージ結果
+            type: object
+            required:
+                - movedLinkCount
+                - mergedSeriesCount
+            properties:
+                movedLinkCount:
+                    type: integer
+                mergedSeriesCount:
+                    description: 統合して削除したシリーズ数
+                    type: integer
+
+        DictionaryWorkItem:
+            description: 作品辞書 (しょぼいカレンダー / Annict / Wikidata) の検索結果 1 件
+            type: object
+            required:
+                - title
+                - source
+                - matchType
+            properties:
+                title:
+                    type: string
+                titleKana:
+                    type: string
+                    nullable: true
+                syobocalTid:
+                    type: integer
+                    nullable: true
+                annictId:
+                    type: integer
+                    nullable: true
+                wikidataQid:
+                    type: string
+                    nullable: true
+                tmdbId:
+                    type: integer
+                    nullable: true
+                seasonYear:
+                    type: integer
+                    nullable: true
+                seasonName:
+                    type: string
+                    nullable: true
+                    enum: [WINTER, SPRING, SUMMER, AUTUMN]
+                totalEpisodes:
+                    type: integer
+                    nullable: true
+                source:
+                    description: どの辞書で確定したか
+                    type: string
+                    enum: [syobocal, annict, wikidata]
+                matchType:
+                    description: 照合の種別
+                    type: string
+                    enum: [exact, contain, prefix]
+                seriesId:
+                    description: すでにローカルにあるシリーズの id (未登録なら null)
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/SeriesId'
+
+        DictionaryWorkSearchResult:
+            description: 作品辞書の横断検索結果
+            type: object
+            required:
+                - total
+                - items
+            properties:
+                total:
+                    type: integer
+                items:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/DictionaryWorkItem'
+
+        CreateSeriesFromDictionaryOption:
+            description: 辞書の作品からシリーズを作るリクエストボディ (いずれか 1 つ以上を指定する)
+            type: object
+            properties:
+                syobocalTid:
+                    type: integer
+                    nullable: true
+                annictId:
+                    type: integer
+                    nullable: true
+                wikidataQid:
+                    type: string
+                    nullable: true
+
+        CreateSeriesFromDictionaryResult:
+            description: 辞書からのシリーズ作成結果
+            type: object
+            required:
+                - seriesId
+                - title
+                - created
+            properties:
+                seriesId:
+                    $ref: '#/components/schemas/SeriesId'
+                title:
+                    type: string
+                created:
+                    description: 新規作成した場合 true。既存シリーズを再利用した場合 false
+                    type: boolean
+
+        EmptySeriesItem:
+            description: 録画が 0 件のシリーズ 1 件
+            type: object
+            required:
+                - seriesId
+                - title
+                - normalizedTitle
+                - origin
+                - aliasCount
+                - episodeCount
+                - createdAt
+                - updatedAt
+            properties:
+                seriesId:
+                    $ref: '#/components/schemas/SeriesId'
+                title:
+                    type: string
+                normalizedTitle:
+                    type: string
+                origin:
+                    $ref: '#/components/schemas/SeriesOrigin'
+                aliasCount:
+                    description: このシリーズを指しているエイリアス辞書の件数 (削除すると一緒に消える)
+                    type: integer
+                episodeCount:
+                    description: このシリーズに登録されているエピソード数 (削除すると一緒に消える)
+                    type: integer
+                seasonYear:
+                    type: integer
+                    nullable: true
+                seasonName:
+                    type: string
+                    nullable: true
+                    enum: [WINTER, SPRING, SUMMER, AUTUMN]
+                createdAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+                updatedAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+
+        EmptySeriesListResult:
+            description: 録画が 0 件のシリーズ一覧
+            type: object
+            required:
+                - total
+                - items
+            properties:
+                total:
+                    type: integer
+                items:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/EmptySeriesItem'
+
+        DeleteEmptySeriesOption:
+            description: 録画が 0 件のシリーズ削除のリクエストボディ
+            type: object
+            properties:
+                seriesIds:
+                    description: 削除対象のシリーズ id。省略した場合は録画 0 件のシリーズをすべて削除する
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/SeriesId'
+
+        DeleteEmptySeriesResult:
+            description: 録画が 0 件のシリーズ削除結果
+            type: object
+            required:
+                - deletedSeriesCount
+                - deletedAliasCount
+                - deletedEpisodeCount
+            properties:
+                deletedSeriesCount:
+                    type: integer
+                deletedAliasCount:
+                    description: 一緒に削除したエイリアス辞書の件数
+                    type: integer
+                deletedEpisodeCount:
+                    description: 一緒に削除したエピソード数
+                    type: integer
+
+        SplitSeriesOption:
+            description: シリーズ分割のリクエストボディ
+            type: object
+            required:
+                - recordedIds
+                - newTitle
+            properties:
+                recordedIds:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/RecordedId'
+                newTitle:
+                    type: string
+
+        SplitSeriesResult:
+            description: シリーズ分割結果
+            type: object
+            required:
+                - seriesId
+                - title
+            properties:
+                seriesId:
+                    $ref: '#/components/schemas/SeriesId'
+                title:
+                    type: string
+
+        UpdateSeriesAliasOption:
+            description: エイリアス辞書の付け替え (付け替えた辞書は手動修正扱いになる)
+            type: object
+            properties:
+                seriesId:
+                    $ref: '#/components/schemas/SeriesId'
+                seriesTitle:
+                    description: seriesId 未指定時の付け替え先シリーズ名 (存在しなければ新規作成)
+                    type: string
+
+        BulkSeriesAliasItem:
+            description: エイリアス辞書の一括編集 1 件分
+            type: object
+            required:
+                - aliasId
+            properties:
+                aliasId:
+                    type: integer
+                seriesId:
+                    $ref: '#/components/schemas/SeriesId'
+                seriesTitle:
+                    type: string
+                remove:
+                    description: true の場合は付け替えではなく削除する
+                    type: boolean
+
+        BulkUpdateSeriesAliasOption:
+            description: エイリアス辞書の一括編集リクエストボディ
+            type: object
+            required:
+                - items
+            properties:
+                items:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/BulkSeriesAliasItem'
+
+        BulkUpdateSeriesAliasResult:
+            description: エイリアス辞書の一括編集結果
+            type: object
+            required:
+                - updated
+                - removed
+                - failed
+            properties:
+                updated:
+                    type: integer
+                removed:
+                    type: integer
+                failed:
+                    type: array
+                    items:
+                        type: object
+                        required:
+                            - aliasId
+                            - message
+                        properties:
+                            aliasId:
+                                type: integer
+                            message:
+                                type: string
+
+        SeriesAliasItem:
+            description: シリーズエイリアス辞書の1件
+            type: object
+            required:
+                - id
+                - normalizedTitle
+                - seriesId
+                - seriesTitle
+                - source
+                - createdAt
+            properties:
+                id:
+                    type: integer
+                normalizedTitle:
+                    type: string
+                seriesId:
+                    $ref: '#/components/schemas/SeriesId'
+                source:
+                    description: 学習元 (manual = 手動修正 / llm = LLM 抽出を検証して自動学習)
+                    type: string
+                    enum:
+                        - manual
+                        - llm
+                seriesTitle:
+                    type: string
+                createdAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+
+        SeriesBackfillOption:
+            description: 既存録画のシリーズ化バックフィル開始オプション
+            type: object
+            properties:
+                dryRun:
+                    description: true の場合 DB を変更せずマッチ結果のプレビューのみ行う
+                    type: boolean
+                chunkSize:
+                    description: 1 回に処理する録画件数 (省略時はデフォルト値)
+                    type: integer
+                restart:
+                    description: true の場合、前回の再開位置を破棄して先頭から実行し直す
+                    type: boolean
+                onlyUnlinked:
+                    description: true の場合、まだシリーズへリンクされていない録画だけを対象にする
+                    type: boolean
+                latest:
+                    description: 指定した場合、直近 (id の新しい方から) この件数の録画だけを対象にする
+                    type: integer
+                    minimum: 1
+
+        SeriesBackfillState:
+            description: バックフィルの実行状態
+            type: string
+            enum:
+                - idle
+                - running
+                - completed
+                - canceled
+                - failed
+
+        SeriesBackfillPreviewCandidate:
+            description: ドライラン時の候補シリーズ (seriesId が null の候補はドライラン中に新規作成予定の仮シリーズ)
+            type: object
+            required:
+                - seriesId
+                - seriesTitle
+                - score
+            properties:
+                seriesId:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/SeriesId'
+                seriesTitle:
+                    type: string
+                score:
+                    type: number
+
+        SeriesBackfillPreviewItem:
+            description: ドライラン時の 1 録画分のプレビュー結果
+            type: object
+            required:
+                - recordedId
+                - title
+                - matched
+                - seriesId
+                - seriesTitle
+                - confidence
+                - candidates
+            properties:
+                recordedId:
+                    $ref: '#/components/schemas/RecordedId'
+                title:
+                    type: string
+                matched:
+                    description: 'true: 確定シリーズ (または新規作成予定) / false: 未確定 (候補のみ)'
+                    type: boolean
+                seriesId:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/SeriesId'
+                seriesTitle:
+                    type: string
+                    nullable: true
+                confidence:
+                    type: number
+                    nullable: true
+                candidates:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/SeriesBackfillPreviewCandidate'
+
+        SeriesBackfillResult:
+            description: バックフィルの進捗状況
+            type: object
+            required:
+                - state
+                - dryRun
+                - total
+                - processed
+                - linked
+                - pending
+                - skipped
+                - failed
+                - startedAt
+                - finishedAt
+                - lastRecordedId
+                - error
+            properties:
+                state:
+                    $ref: '#/components/schemas/SeriesBackfillState'
+                dryRun:
+                    type: boolean
+                total:
+                    description: 対象総数 (処理済み + 残件数。処理が進むごとに更新される)
+                    type: integer
+                processed:
+                    type: integer
+                linked:
+                    description: シリーズへリンクされた (または新規シリーズが作成された) 件数
+                    type: integer
+                pending:
+                    description: 未確定キューへ積まれた件数
+                    type: integer
+                skipped:
+                    description: manualLock 済み、またはタイトルが解決できず何もしなかった件数
+                    type: integer
+                failed:
+                    type: integer
+                startedAt:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UnixtimeMS'
+                finishedAt:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UnixtimeMS'
+                lastRecordedId:
+                    $ref: '#/components/schemas/RecordedId'
+                error:
+                    type: string
+                    nullable: true
+                previewItems:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/SeriesBackfillPreviewItem'
+                previewTruncated:
+                    type: boolean
+                onlyUnlinked:
+                    description: 実行時に指定された「未リンクのみ」条件
+                    type: boolean
+                latest:
+                    description: 実行時に指定された「直近 N 件のみ」条件
+                    type: integer
+                    nullable: true
+
+        SeriesAnalyzeStep:
+            description: シリーズ判定 1 ステップ分のトレース (どの照会に何を投げて何が返ったか)
+            type: object
+            required:
+                - step
+                - label
+                - input
+                - output
+                - matched
+            properties:
+                step:
+                    description: 判定ステップの識別子
+                    type: string
+                label:
+                    description: 画面表示用のステップ名
+                    type: string
+                input:
+                    description: このステップへの入力の要約
+                    type: string
+                output:
+                    description: このステップの戻り値の要約
+                    type: string
+                matched:
+                    description: このステップで確定したか
+                    type: boolean
+                detail:
+                    description: 生の戻り値 (JSON 文字列)
+                    type: string
+
+        SeriesAnalyzeResult:
+            description: 録画 1 件のシリーズ判定結果 (トレース付き)
+            type: object
+            required:
+                - recordedId
+                - title
+                - channelId
+                - startAt
+                - linked
+                - pending
+                - seriesId
+                - seriesTitle
+                - episodeNumber
+                - episodeTitle
+                - airType
+                - matchMethod
+                - confidence
+                - manualLock
+                - steps
+            properties:
+                recordedId:
+                    $ref: '#/components/schemas/RecordedId'
+                title:
+                    type: string
+                channelId:
+                    $ref: '#/components/schemas/ChannelId'
+                startAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+                linked:
+                    description: シリーズへリンクされたか
+                    type: boolean
+                pending:
+                    description: 未確定キューへ積まれたか
+                    type: boolean
+                seriesId:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/SeriesId'
+                seriesTitle:
+                    type: string
+                    nullable: true
+                episodeNumber:
+                    type: integer
+                    nullable: true
+                episodeTitle:
+                    type: string
+                    nullable: true
+                airType:
+                    type: string
+                    nullable: true
+                matchMethod:
+                    type: string
+                    nullable: true
+                confidence:
+                    type: number
+                    nullable: true
+                manualLock:
+                    description: 手動確定済みで判定をスキップした場合 true
+                    type: boolean
+                steps:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/SeriesAnalyzeStep'
+
+        MetadataProviderInfo:
+            type: object
+            properties:
+                name:
+                    type: string
+            required:
+                - name
+
+        MetadataProviders:
+            type: object
+            properties:
+                providers:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/MetadataProviderInfo'
+            required:
+                - providers
+
+        MetadataSearchResult:
+            type: object
+            properties:
+                provider:
+                    type: string
+                externalId:
+                    type: string
+                title:
+                    type: string
+                originalTitle:
+                    type: string
+                year:
+                    type: integer
+                score:
+                    type: number
+                imageUrl:
+                    type: string
+                syobocalTid:
+                    type: integer
+            required:
+                - provider
+                - externalId
+                - title
+                - score
+
+        MetadataSearchResults:
+            type: object
+            properties:
+                results:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/MetadataSearchResult'
+            required:
+                - results
+
+        ProgramSeriesMetrics:
+            description: 番組⇄シリーズ名前マッピングの精度メトリクス (§4.10)
+            type: object
+            properties:
+                unmatchedRate:
+                    description: 直近バッチにおける未マッチ番組率 (0〜1)
+                    type: number
+                confidenceHistogram:
+                    description: confidence 分布 (0.0-0.2 / 0.2-0.4 / 0.4-0.6 / 0.6-0.8 / 0.8-1.0 の 5 バケット)
+                    type: array
+                    items:
+                        type: integer
+                totalPrograms:
+                    type: integer
+                matchedPrograms:
+                    type: integer
+                updatedAt:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UnixtimeMS'
+            required:
+                - unmatchedRate
+                - confidenceHistogram
+                - totalPrograms
+                - matchedPrograms
+                - updatedAt
+
+        AnnictWatchSyncResult:
+            description: Annict 視聴記録の手動再同期結果 (§5.5)
+            type: object
+            properties:
+                queued:
+                    description: 同期キューへ積んだ (積み直した) 件数
+                    type: integer
+            required:
+                - queued
+
+        MissingEpisodeProposalCandidate:
+            type: object
+            properties:
+                programId:
+                    type: integer
+                channelId:
+                    type: integer
+                name:
+                    type: string
+                startAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+                endAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+            required:
+                - programId
+                - channelId
+                - name
+                - startAt
+                - endAt
+
+        MissingEpisodeProposal:
+            description: 欠番話数の補完予約提案 (§4.7)
+            type: object
+            properties:
+                seasonNumber:
+                    type: integer
+                episodeNumber:
+                    type: integer
+                candidates:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/MissingEpisodeProposalCandidate'
+            required:
+                - seasonNumber
+                - episodeNumber
+                - candidates
+
+        MissingEpisodeProposals:
+            type: object
+            properties:
+                proposals:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/MissingEpisodeProposal'
+            required:
+                - proposals
+
+        ConfigFieldInfo:
+            description: config.yml の編集可能なキー
+            type: object
+            required:
+                - key
+                - requiresRestart
+            properties:
+                key:
+                    type: string
+                requiresRestart:
+                    description: 変更に EPGStation の再起動が必要か
+                    type: boolean
+
+        EditableConfig:
+            description: config.yml 編集画面用の情報
+            type: object
+            required:
+                - effective
+                - file
+                - overlay
+                - fields
+            properties:
+                effective:
+                    description: config.yml + GUI の差分を重ねた実効値 (秘密情報はマスク済み)
+                    type: object
+                    additionalProperties: true
+                file:
+                    description: config.yml をそのまま読んだ値
+                    type: object
+                    additionalProperties: true
+                overlay:
+                    description: GUI で保存されている差分
+                    type: object
+                    additionalProperties: true
+                fields:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/ConfigFieldInfo'
+
+        AppSettingValue:
+            description: >-
+                システム設定 (トップレベルキーごとの値。metadata / notifications / series / dashboard / logging)。
+                構造は src/model/api/config/AppSettingSchema.ts の JSON Schema が正であり、
+                ここでは詳細な形は規定しない (任意の JSON オブジェクト)
+            type: object
+            additionalProperties: true
+
+        AppSettingUpdateResult:
+            description: システム設定更新・ロールバック結果
+            type: object
+            required:
+                - settings
+                - requiresRestart
+                - requiresRestartKeys
+            properties:
+                settings:
+                    $ref: '#/components/schemas/AppSettingValue'
+                requiresRestart:
+                    description: 今回の更新に Operator の再初期化を要するキーが含まれていたか
+                    type: boolean
+                requiresRestartKeys:
+                    description: 再起動 (再初期化) を要すると判定されたキーの一覧
+                    type: array
+                    items:
+                        type: string
+
+        AppSettingHistoryItem:
+            description: システム設定の変更履歴 1 件分 (前の値そのものは含まない)
+            type: object
+            required:
+                - id
+                - key
+                - updatedAt
+            properties:
+                id:
+                    type: integer
+                key:
+                    type: string
+                updatedAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+
+        NotificationTestResult:
+            description: 通知テスト送信結果
+            type: object
+            required:
+                - delivered
+                - failed
+            properties:
+                delivered:
+                    description: 配信に成功した通知先名の一覧
+                    type: array
+                    items:
+                        type: string
+                failed:
+                    description: 配信に失敗した通知先名の一覧
+                    type: array
+                    items:
+                        type: string
+
+        AnnictConnectionTestResult:
+            description: Annict 接続テスト結果 (viewer クエリでの疎通・トークンの有効性確認, §6.2)
+            type: object
+            required:
+                - ok
+            properties:
+                ok:
+                    type: boolean
+                username:
+                    description: 疎通に成功した場合の Annict ユーザー名
+                    type: string
+                message:
+                    description: 失敗時のエラー内容 (AnnictSyncFeatureIsDisabled / AnnictAuthenticationFailed 等)
+                    type: string
+
+        SyobocalChannelMapEntry:
+            description: しょぼいカレンダー ChID ⇄ Mirakurun networkId/serviceId のマッピング表 1 エントリ (§5.3・§6.2)
+            type: object
+            required:
+                - chId
+                - networkId
+                - serviceId
+            properties:
+                chId:
+                    description: しょぼいカレンダー ChID
+                    type: integer
+                networkId:
+                    $ref: '#/components/schemas/NetworkId'
+                serviceId:
+                    $ref: '#/components/schemas/ServiceId'
+                syobocal:
+                    description: false の場合、この局はしょぼいカレンダーへ未登録として扱い問い合わせをスキップする
+                    type: boolean
+
+        SyobocalTitleDictionaryStatus:
+            description: しょぼいカレンダー アニメ作品タイトル辞書の状態
+            type: object
+            required:
+                - titleCount
+                - lastUpdate
+                - lastSyncedAt
+                - running
+                - error
+            properties:
+                titleCount:
+                    description: 辞書に登録されている作品数
+                    type: integer
+                lastUpdate:
+                    description: しょぼいカレンダー側の最終更新日時 (差分取得カーソル)
+                    type: string
+                    nullable: true
+                lastSyncedAt:
+                    description: 直近の同期完了時刻 (UNIX time ms)
+                    type: integer
+                    nullable: true
+                running:
+                    description: 同期実行中か
+                    type: boolean
+                error:
+                    description: 直近の同期でのエラーメッセージ
+                    type: string
+                    nullable: true
+
+        SyobocalTitleSyncResult:
+            description: しょぼいカレンダー アニメ作品タイトル辞書の同期結果
+            allOf:
+                - $ref: '#/components/schemas/SyobocalTitleDictionaryStatus'
+                - type: object
+                  required:
+                      - imported
+                      - full
+                  properties:
+                      imported:
+                          description: 今回の同期で取り込んだ作品数
+                          type: integer
+                      full:
+                          description: 全件取得だったか
+                          type: boolean
+
+        AnnictWorkDictionaryStatus:
+            description: Annict 作品辞書の状態
+            type: object
+            required:
+                - workCount
+                - linkedToSyobocalCount
+                - lastSyncedAt
+                - running
+                - error
+            properties:
+                workCount:
+                    description: 辞書に登録されている作品数
+                    type: integer
+                linkedToSyobocalCount:
+                    description: そのうち syobocalTid を持つ (しょぼいカレンダー作品と厳密に結合できる) 作品数
+                    type: integer
+                lastSyncedAt:
+                    description: 直近の同期完了時刻 (UNIX time ms)
+                    type: integer
+                    nullable: true
+                running:
+                    description: 同期実行中か
+                    type: boolean
+                error:
+                    description: 直近の同期でのエラーメッセージ
+                    type: string
+                    nullable: true
+
+        AnnictWorkSyncResult:
+            description: Annict 作品辞書の同期結果
+            allOf:
+                - $ref: '#/components/schemas/AnnictWorkDictionaryStatus'
+                - type: object
+                  required:
+                      - imported
+                  properties:
+                      imported:
+                          description: 今回の同期で取り込んだ作品数
+                          type: integer
+
+        SharedDataSyncResult:
+            description: 共有静的データの「今すぐ同期」結果 (§5.7・§6.2)
+            type: object
+            required:
+                - updated
+            properties:
+                updated:
+                    description: 取得に成功し反映されたか (URL 未設定・取得失敗時は false)
+                    type: boolean
+
+        AuthRole:
+            description: ログインユーザーの権限 (admin = システム管理者 / user = 一般)
+            type: string
+            enum: [admin, user]
+
+        AuthProviderItem:
+            description: 設定済みの外部 ID プロバイダ (秘密情報は含まない)
+            type: object
+            required:
+                - id
+                - label
+                - authorizeUrl
+            properties:
+                id:
+                    type: string
+                label:
+                    type: string
+                authorizeUrl:
+                    type: string
+
+        UpdateUserRoleOption:
+            description: 権限変更のリクエストボディ
+            type: object
+            required:
+                - role
+            properties:
+                role:
+                    $ref: '#/components/schemas/AuthRole'
+
+        AuthUserItem:
+            description: ログインユーザー
+            type: object
+            required:
+                - id
+                - name
+                - role
+                - hasPassword
+                - providers
+                - createdAt
+            properties:
+                id:
+                    type: integer
+                name:
+                    type: string
+                role:
+                    $ref: '#/components/schemas/AuthRole'
+                hasPassword:
+                    description: パスワードでログインできるか (SSO のみのユーザーは false)
+                    type: boolean
+                providers:
+                    description: 紐付いている外部 ID プロバイダ
+                    type: array
+                    items:
+                        type: string
+                createdAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+
+        AuthStatus:
+            description: 認証状態
+            type: object
+            required:
+                - enabled
+                - initialized
+                - user
+                - providers
+                - allowSignUp
+                - allowAnonymous
+            properties:
+                enabled:
+                    description: config.yml の auth.enabled
+                    type: boolean
+                initialized:
+                    description: 初期ユーザーが作成済みか
+                    type: boolean
+                user:
+                    nullable: true
+                    type: object
+                    required:
+                        - id
+                        - name
+                        - role
+                    properties:
+                        id:
+                            type: integer
+                        name:
+                            type: string
+                        role:
+                            $ref: '#/components/schemas/AuthRole'
+                providers:
+                    description: 設定済みの外部 ID プロバイダ (ログイン画面のボタン用)
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/AuthProviderItem'
+                allowSignUp:
+                    description: 2 人目以降のサインアップを許可しているか
+                    type: boolean
+                allowAnonymous:
+                    description: 未ログインでも一般ユーザーと同じ操作を許可しているか
+                    type: boolean
+
+        AuthCredentialOption:
+            description: ログイン / 初期セットアップのリクエストボディ
+            type: object
+            required:
+                - name
+                - password
+            properties:
+                name:
+                    type: string
+                    maxLength: 64
+                password:
+                    type: string
+                    maxLength: 200
+
+        ChangePasswordOption:
+            description: パスワード変更のリクエストボディ
+            type: object
+            required:
+                - newPassword
+            properties:
+                newPassword:
+                    type: string
+                    maxLength: 200
+                currentPassword:
+                    description: 自分のパスワードを変更する場合に必要
+                    type: string
+                    maxLength: 200
+
+        UpdateReleaseInfo:
+            description: 公開されているリリース 1 件分
+            type: object
+            required:
+                - tag
+                - name
+                - prerelease
+                - publishedAt
+                - htmlUrl
+                - body
+            properties:
+                tag:
+                    type: string
+                name:
+                    type: string
+                prerelease:
+                    type: boolean
+                publishedAt:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UnixtimeMS'
+                htmlUrl:
+                    type: string
+                body:
+                    type: string
+
+        UpdateJobLogLine:
+            description: 更新ジョブのログ 1 行
+            type: object
+            required:
+                - at
+                - level
+                - message
+            properties:
+                at:
+                    $ref: '#/components/schemas/UnixtimeMS'
+                level:
+                    type: string
+                    enum: [info, command, error]
+                message:
+                    type: string
+
+        UpdateJob:
+            description: 更新ジョブ
+            type: object
+            required:
+                - status
+                - tag
+                - step
+                - startedAt
+                - finishedAt
+                - error
+                - logs
+            properties:
+                status:
+                    type: string
+                    enum: [idle, running, succeeded, failed, restarting]
+                tag:
+                    type: string
+                    nullable: true
+                step:
+                    type: string
+                    nullable: true
+                startedAt:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UnixtimeMS'
+                finishedAt:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UnixtimeMS'
+                error:
+                    type: string
+                    nullable: true
+                logs:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/UpdateJobLogLine'
+
+        UpdateBranchInfo:
+            description: 追従先ブランチ (main 等) の最新コミット
+            type: object
+            required:
+                - name
+                - sha
+                - shortSha
+                - message
+                - committedAt
+                - htmlUrl
+                - upToDate
+            properties:
+                name:
+                    type: string
+                sha:
+                    type: string
+                shortSha:
+                    type: string
+                message:
+                    type: string
+                committedAt:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UnixtimeMS'
+                htmlUrl:
+                    type: string
+                upToDate:
+                    type: boolean
+
+        UpdateStatus:
+            description: 更新状況
+            type: object
+            required:
+                - currentVersion
+                - currentIsPrerelease
+                - latestStable
+                - latestPrerelease
+                - availableRelease
+                - availableChannel
+                - checkedAt
+                - checkError
+                - branch
+                - currentCommit
+                - installationType
+                - supervisor
+                - canUpdate
+                - updateNote
+                - restartNote
+                - releasesUrl
+                - job
+            properties:
+                currentVersion:
+                    type: string
+                currentIsPrerelease:
+                    type: boolean
+                latestStable:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UpdateReleaseInfo'
+                latestPrerelease:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UpdateReleaseInfo'
+                availableRelease:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UpdateReleaseInfo'
+                availableChannel:
+                    type: string
+                    nullable: true
+                    enum: [stable, prerelease]
+                checkedAt:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UnixtimeMS'
+                checkError:
+                    type: string
+                    nullable: true
+                branch:
+                    nullable: true
+                    allOf:
+                        - $ref: '#/components/schemas/UpdateBranchInfo'
+                currentCommit:
+                    type: string
+                    nullable: true
+                installationType:
+                    type: string
+                    enum: [git, archive]
+                supervisor:
+                    type: string
+                    enum: [docker, systemd, pm2, windows-service, none]
+                canUpdate:
+                    type: boolean
+                updateNote:
+                    type: string
+                restartNote:
+                    description: 更新を伴わない再起動の挙動の説明
+                    type: string
+                releasesUrl:
+                    type: string
+                job:
+                    $ref: '#/components/schemas/UpdateJob'
+
+        RunUpdateOption:
+            description: 更新実行のリクエストボディ
+            type: object
+            properties:
+                tag:
+                    description: 更新先のタグ (省略時は最新リリース)
+                    type: string
+                refType:
+                    description: 更新先の指定方法。branch はブランチの最新コミットへ追従する (既定 tag)
+                    type: string
+                    enum: [tag, branch]
+                ref:
+                    description: refType が branch のときの対象ブランチ (省略時は設定のブランチ)
+                    type: string
+                restart:
+                    description: 更新完了後に再起動するか (既定 true)
+                    type: boolean
+
+        UpdateRestartResult:
+            description: 再起動の受付結果
+            type: object
+            required:
+                - supervisor
+                - note
+                - restartAt
+            properties:
+                supervisor:
+                    description: 再起動を担う仕組み
+                    type: string
+                    enum: [docker, systemd, pm2, windows-service, none]
+                note:
+                    description: 再起動の挙動の説明
+                    type: string
+                restartAt:
+                    description: プロセスを終了する予定時刻
+                    allOf:
+                        - $ref: '#/components/schemas/UnixtimeMS'
+
+        NotificationFailureHistoryItem:
+            description: リトライ上限に達し送信を断念した通知の履歴
+            type: object
+            required:
+                - id
+                - targetName
+                - eventType
+                - attempts
+                - lastError
+                - updatedAt
+            properties:
+                id:
+                    type: integer
+                targetName:
+                    type: string
+                eventType:
+                    type: string
+                attempts:
+                    type: integer
+                lastError:
+                    type: string
+                    nullable: true
+                updatedAt:
+                    $ref: '#/components/schemas/UnixtimeMS'
+
     parameters:
         Offset:
             description: offset
@@ -1871,11 +4594,27 @@ components:
             schema:
                 $ref: '#/components/schemas/UnixtimeMS'
 
+        IncludeNextProgram:
+            description: 次の番組も含めて取得するか
+            in: query
+            name: includeNextProgram
+            required: false
+            schema:
+                type: boolean
+
         IsHalfWidth:
             description: 半角文字で取得するか
             in: query
             name: isHalfWidth
             required: true
+            schema:
+                type: boolean
+
+        IsHalfWidthOptional:
+            description: 半角文字で取得するか (省略時 false)
+            in: query
+            name: isHalfWidth
+            required: false
             schema:
                 type: boolean
 
@@ -1952,6 +4691,13 @@ components:
                 type: array
                 items:
                     type: string
+
+        QueryRecordedTagId:
+            description: 絞り込む RecordedTagId (advancedSearch 有効時は子孫タグも含む)
+            name: tagId
+            in: query
+            schema:
+                $ref: '#/components/schemas/RecordedTagId'
 
         requiredGR:
             description: GR
@@ -2347,10 +5093,26 @@ components:
             schema:
                 type: integer
 
+        PathImportJobId:
+            description: 外部録画ファイル取り込みジョブ id
+            in: path
+            name: jobId
+            required: true
+            schema:
+                type: string
+
         PathRecordedTagId:
             description: recorded tag id
             in: path
             name: tagId
+            required: true
+            schema:
+                type: integer
+
+        PathSavedSearchId:
+            description: saved search id
+            in: path
+            name: searchId
             required: true
             schema:
                 type: integer
@@ -2388,12 +5150,21 @@ components:
                 $ref: '#/components/schemas/StreamId'
 
         StreamMode:
-            description: ストリーミング設定
+            description: ストリーミング設定 (旧形式 index)。profile 未指定時は必須
             in: query
             name: mode
-            required: true
+            required: false
             schema:
                 type: integer
+
+        StreamProfile:
+            description:
+                配信プリセット id (新形式)。指定時は mode より優先される。mode / profile どちらも未指定の場合は 400
+            in: query
+            name: profile
+            required: false
+            schema:
+                type: string
 
         StreamPlayPosition:
             description: 再生位置
@@ -2420,3 +5191,54 @@ components:
             schema:
                 type: integer
                 default: 3
+
+        PathLogFileId:
+            description: ログファイル id
+            in: path
+            name: logFileId
+            required: true
+            schema:
+                type: string
+
+        LogLines:
+            description: 末尾から取得する行数
+            in: query
+            name: lines
+            required: false
+            schema:
+                type: integer
+                minimum: 1
+                maximum: 5000
+                default: 500
+
+        LogKeyword:
+            description: 絞り込みキーワード
+            in: query
+            name: keyword
+            required: false
+            schema:
+                type: string
+
+        QuerySeriesId:
+            description: シリーズ id (絞り込み用、任意)
+            name: seriesId
+            in: query
+            required: false
+            schema:
+                $ref: '#/components/schemas/SeriesId'
+
+        PathPendingId:
+            description: 未確定キュー id
+            in: path
+            name: pendingId
+            required: true
+            schema:
+                type: integer
+
+        PathAliasId:
+            description: エイリアス id
+            in: path
+            name: aliasId
+            required: true
+            schema:
+                type: integer

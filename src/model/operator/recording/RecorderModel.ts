@@ -12,7 +12,9 @@ import RecordedHistory from '../../../db/entities/RecordedHistory';
 import Reserve from '../../../db/entities/Reserve';
 import VideoFile from '../../../db/entities/VideoFile';
 import FileUtil from '../../../util/FileUtil';
+import { formatLogTime, formatTimeChange } from '../../../util/ProgramTimeLog';
 import StrUtil from '../../../util/StrUtil';
+import IChannelDB from '../../db/IChannelDB';
 import IDropLogFileDB from '../../db/IDropLogFileDB';
 import IProgramDB from '../../db/IProgramDB';
 import IRecordedDB from '../../db/IRecordedDB';
@@ -20,11 +22,16 @@ import IRecordedHistoryDB from '../../db/IRecordedHistoryDB';
 import IReserveDB from '../../db/IReserveDB';
 import IVideoFileDB from '../../db/IVideoFileDB';
 import IRecordingEvent from '../../event/IRecordingEvent';
+import IReserveEvent from '../../event/IReserveEvent';
 import IConfigFile from '../../IConfigFile';
 import IConfiguration from '../../IConfiguration';
+import EitPresentParser, { EitPresentEvent } from './EitPresentParser';
+import { decideRecordingRetry, RecordingRetryReason, resolveRecordingRetryConfig } from './RecordingRetryPolicy';
+import { decideRecordingStart, resolveRecordingStartGateConfig } from './RecordingStartGate';
 import ILogger from '../../ILogger';
 import ILoggerModel from '../../ILoggerModel';
 import IMirakurunClientModel from '../../IMirakurunClientModel';
+import INotificationDispatcher from '../../notification/INotificationDispatcher';
 import IDropCheckerModel from './IDropCheckerModel';
 import IRecorderModel from './IRecorderModel';
 import IRecordingStreamCreator from './IRecordingStreamCreator';
@@ -38,6 +45,7 @@ class RecorderModel implements IRecorderModel {
     private log: ILogger;
     private config: IConfigFile;
     private programDB: IProgramDB;
+    private channelDB: IChannelDB;
     private reserveDB: IReserveDB;
     private recordedDB: IRecordedDB;
     private recordedHistoryDB: IRecordedHistoryDB;
@@ -48,12 +56,18 @@ class RecorderModel implements IRecorderModel {
     private recordingUtil: IRecordingUtilModel;
     private recordingEvent: IRecordingEvent;
     private mirakurunClientModel: IMirakurunClientModel;
+    private notification: INotificationDispatcher;
+    private reserveEvent: IReserveEvent;
 
     private reserve!: Reserve;
     private recordedId: apid.RecordedId | null = null;
     private videoFileId: apid.VideoFileId | null = null;
     private videoFileFulPath: string | null = null;
     private timerId: NodeJS.Timeout | null = null;
+    // 番組開始待ちの起点 (ms)。チューナー異常のリトライ回数とは別に数える
+    private waitingForEventSince: number | null = null;
+    // チューナー異常など、待っても直らない可能性がある失敗の回数
+    private errorRetryCount: number = 0;
     private stream: http.IncomingMessage | null = null;
     private passThroughStreamForWrite: stream.PassThrough | null = null;
     private recFile: fs.WriteStream | null = null;
@@ -76,6 +90,7 @@ class RecorderModel implements IRecorderModel {
         @inject('ILoggerModel') logger: ILoggerModel,
         @inject('IConfiguration') configuration: IConfiguration,
         @inject('IProgramDB') programDB: IProgramDB,
+        @inject('IChannelDB') channelDB: IChannelDB,
         @inject('IReserveDB') reserveDB: IReserveDB,
         @inject('IRecordedDB') recordedDB: IRecordedDB,
         @inject('IRecordedHistoryDB') recordedHistoryDB: IRecordedHistoryDB,
@@ -87,10 +102,13 @@ class RecorderModel implements IRecorderModel {
         @inject('IRecordingUtilModel') recordingUtil: IRecordingUtilModel,
         @inject('IRecordingEvent') recordingEvent: IRecordingEvent,
         @inject('IMirakurunClientModel') mirakurunClientModel: IMirakurunClientModel,
+        @inject('INotificationDispatcher') notification: INotificationDispatcher,
+        @inject('IReserveEvent') reserveEvent: IReserveEvent,
     ) {
         this.log = logger.getLogger();
         this.config = configuration.getConfig();
         this.programDB = programDB;
+        this.channelDB = channelDB;
         this.reserveDB = reserveDB;
         this.recordedDB = recordedDB;
         this.recordedHistoryDB = recordedHistoryDB;
@@ -101,6 +119,27 @@ class RecorderModel implements IRecorderModel {
         this.recordingUtil = recordingUtil;
         this.recordingEvent = recordingEvent;
         this.mirakurunClientModel = mirakurunClientModel;
+        this.notification = notification;
+        this.reserveEvent = reserveEvent;
+    }
+
+    /**
+     * EIT[p/f] 追従中 (前番組の延長などで番組開始を待っている) 状態を更新し、画面へ通知する
+     * @param isFollowingSchedule: boolean 追従中か
+     */
+    private async setFollowingSchedule(isFollowingSchedule: boolean): Promise<void> {
+        if (this.reserve.isFollowingSchedule === isFollowingSchedule) {
+            return;
+        }
+
+        this.reserve.isFollowingSchedule = isFollowingSchedule;
+        try {
+            await this.reserveDB.updateFollowingSchedule(this.reserve.id, isFollowingSchedule);
+            this.reserveEvent.emitUpdated({ update: [this.reserve], isSuppressLog: true });
+        } catch (err: any) {
+            this.log.system.error(`update following schedule state error: ${this.reserve.id}`);
+            this.log.system.error(err);
+        }
     }
 
     /**
@@ -151,6 +190,12 @@ class RecorderModel implements IRecorderModel {
      * 録画準備
      */
     private async prepRecord(retry: number = 0): Promise<void> {
+        // 番組開始待ちの起点。予定開始時刻とこの時点の遅い方から数える
+        // (EPG 更新で予約時刻が動いた場合に待ち直せるようにする)
+        if (this.waitingForEventSince === null) {
+            this.waitingForEventSince = Math.max(this.reserve.startAt, new Date().getTime());
+        }
+
         if (this.isStopPrepRec === true) {
             this.isPlanToDelete = false;
             this.emitCancelEvent();
@@ -202,20 +247,49 @@ class RecorderModel implements IRecorderModel {
                 return;
             }
 
-            this.log.system.error(`preprec failed: ${this.reserve.id}`);
-            this.log.system.error(err);
-            if (retry < 3) {
-                // retry
+            // 「番組がまだ始まっていない」のか「チューナー等の異常」なのかで待ち方を分ける。
+            // 前者は前番組の延長 (放送時刻未定) 中に起きる正常な状態なので長く待つ
+            const reason: RecordingRetryReason =
+                err?.message === RecorderModel.WAITING_FOR_EVENT_ERROR ? 'waitingForEvent' : 'error';
+            const retryConfig = resolveRecordingRetryConfig(this.config.recording);
+            const waitedMs = new Date().getTime() - (this.waitingForEventSince ?? new Date().getTime());
+            const decision = decideRecordingRetry({
+                reason,
+                errorRetryCount: this.errorRetryCount,
+                waitedMs,
+                config: retryConfig,
+            });
+
+            if (reason === 'waitingForEvent') {
+                // 前番組の延長などで EIT[p/f] がまだ present になっていない状態。
+                // 画面に「追従中」と出せるように予約へ記録する
+                await this.setFollowingSchedule(true);
+                this.log.system.info(
+                    `waiting for the program to start: reserveId: ${this.reserve.id},` +
+                        ` programId: ${this.reserve.programId},` +
+                        ` scheduled start: ${formatLogTime(this.reserve.startAt)},` +
+                        ` scheduled end: ${formatLogTime(this.reserve.endAt)},` +
+                        ` waited: ${Math.floor(waitedMs / 1000)}s / ${Math.floor(retryConfig.startWaitLimitMs / 1000)}s`,
+                );
+            } else {
+                this.errorRetryCount++;
+                this.log.system.error(`preprec failed: ${this.reserve.id}`);
+                this.log.system.error(err);
+            }
+
+            if (decision.retry === true) {
                 setTimeout(() => {
                     this.prepRecord(retry + 1);
-                }, 1000 * 5); // 5s
-            } else if (retry < 30) {
-                // retry ここに来るのはチューナーが開けない or ソケットのハングアップとか？ //
-                setTimeout(() => {
-                    this.prepRecord(retry + 1);
-                }, 1000 * 60); // 60s
+                }, decision.delayMs);
             } else {
                 this.isPrepRecording = false;
+                if (reason === 'waitingForEvent') {
+                    this.log.system.error(
+                        `the program did not start within the wait limit: reserveId: ${this.reserve.id}`,
+                    );
+                }
+                // 待機を打ち切ったので追従中の表示も解除する
+                await this.setFollowingSchedule(false);
                 // 録画準備失敗を通知
                 this.recordingEvent.emitPrepRecordingFailed(this.reserve);
             }
@@ -231,6 +305,11 @@ class RecorderModel implements IRecorderModel {
         this.isStopPrepRec = false;
         this.isPrepRecording = false;
         this.isRecording = false;
+
+        // 追従中の表示を残さない
+        this.setFollowingSchedule(false).catch(err => {
+            this.log.system.error(err);
+        });
 
         this.eventEmitter.emit(RecorderModel.CANCEL_EVENT);
     }
@@ -306,8 +385,29 @@ class RecorderModel implements IRecorderModel {
             return;
         }
 
+        // 予約した番組が実際に始まるまで待つ (前番組の延長対策)。
+        // 待っている間のデータは捨てるので、前番組が録画ファイルに入らない
+        try {
+            await this.waitForProgramStart();
+        } catch (err: any) {
+            this.destroyStream();
+            throw err;
+        }
+
+        // 録画開始待ちの間にキャンセルされていないか
+        if ((this.isStopPrepRec as boolean) === true) {
+            this.log.system.error(`cancel recording: ${this.reserve.id}`);
+            this.destroyStream();
+            this.emitCancelEvent();
+
+            return;
+        }
+
         this.isPrepRecording = false;
         this.isRecording = true;
+
+        // 番組が始まったので追従中の表示を解除する
+        await this.setFollowingSchedule(false);
 
         // 録画開始内部イベント発行
         // 時刻指定予約で録画準備中に endAt を変えようとした場合にこのイベントを受信してから変える
@@ -396,8 +496,10 @@ class RecorderModel implements IRecorderModel {
                     });
                 }
 
-                reject(new Error('recordingStartError'));
-            }, 1000 * 5);
+                // 「まだ番組が始まっていない」ことを示す専用のエラーにして、
+                // チューナー異常と区別できるようにする
+                reject(new Error(RecorderModel.WAITING_FOR_EVENT_ERROR));
+            }, resolveRecordingRetryConfig(this.config.recording).firstDataTimeoutMs);
 
             // stream データ受診時のコールバック関数定義
             const onData = async () => {
@@ -444,6 +546,114 @@ class RecorderModel implements IRecorderModel {
     }
 
     /**
+     * 予約した番組が実際に始まる (EIT[p/f] present が目的の番組になる) まで待つ。
+     *
+     * 時刻指定予約は Mirakurun のチャンネルストリームを使うため、予定時刻になった瞬間から
+     * データが流れる。前番組が「放送時間未定」で延長している間はまだ前番組なので、
+     * そのまま録り始めると前番組が録画ファイルとして残ってしまう。
+     * ここで EIT[p/f] を読み、目的の番組になるまでデータを捨てて待つ。
+     *
+     * - データ自体が来ない場合は従来どおり `WaitingForEventStart` で再試行へ回す
+     * - EIT[p/f] を読めないまま上限を過ぎた場合は録り逃さないよう開始する (安全側)
+     * - 予約終了時刻を過ぎても始まらない場合は再試行へ回す
+     * @return Promise<void>
+     */
+    private async waitForProgramStart(): Promise<void> {
+        const stream = this.stream;
+        if (stream === null) {
+            throw new Error('StreamIsNull');
+        }
+
+        const gateConfig = resolveRecordingStartGateConfig(this.config.recording);
+        const retryConfig = resolveRecordingRetryConfig(this.config.recording);
+        // Mirakurun の program id は (networkId * 65536 + serviceId) * 65536 + eventId、
+        // channel id は networkId * 100000 + serviceId で作られている
+        const eventId = this.reserve.programId === null ? null : this.reserve.programId % 0x10000;
+        const serviceId = this.reserve.channelId % 100000;
+
+        return new Promise<void>((resolve, reject) => {
+            const parser = new EitPresentParser();
+            let present: EitPresentEvent | null = null;
+            let hasData = false;
+            let lastLoggedReason: string | null = null;
+            const startedAt = new Date().getTime();
+
+            // データが 1 バイトも来ない場合は従来どおり「まだ始まっていない」として再試行へ回す
+            const firstDataTimerId = setTimeout(() => {
+                cleanup();
+                reject(new Error(RecorderModel.WAITING_FOR_EVENT_ERROR));
+            }, retryConfig.firstDataTimeoutMs);
+
+            const cleanup = (): void => {
+                clearTimeout(firstDataTimerId);
+                stream.removeListener('data', onData);
+                // リスナーを外しただけでは流れ続けてデータを取りこぼすため、
+                // 録画の書き込み (pipe) を始めるまで止めておく
+                stream.pause();
+            };
+
+            const onData = (chunk: Buffer): void => {
+                if (hasData === false) {
+                    hasData = true;
+                    clearTimeout(firstDataTimerId);
+                }
+
+                if (gateConfig.enabled === true) {
+                    for (const event of parser.write(chunk)) {
+                        // 同一 TS には複数サービスの EIT が流れるため、対象サービスのものだけ見る
+                        if (event.serviceId !== serviceId) {
+                            continue;
+                        }
+                        present = event;
+                    }
+                }
+
+                const decision = decideRecordingStart({
+                    eventId: eventId,
+                    reserveStartAt: this.reserve.startAt,
+                    present: present,
+                    elapsedMs: new Date().getTime() - startedAt,
+                    config: gateConfig,
+                });
+
+                if (decision.canStart === true) {
+                    this.log.system.info(
+                        `program start detected: reserveId: ${this.reserve.id}, reason: ${decision.reason}`,
+                    );
+                    cleanup();
+                    resolve();
+
+                    return;
+                }
+
+                // 待ちに入ったことは 1 度だけ出す (データ受信のたびに出さない)
+                if (lastLoggedReason !== decision.reason) {
+                    lastLoggedReason = decision.reason;
+                    this.log.system.info(
+                        `waiting for the reserved program to start on air: reserveId: ${this.reserve.id},` +
+                            ` reason: ${decision.reason},` +
+                            ` scheduled start: ${formatLogTime(this.reserve.startAt)},` +
+                            ` on air eventId: ${present === null ? 'unknown' : present.eventId},` +
+                            ` on air start: ${present?.startAt == null ? 'unknown' : formatLogTime(present.startAt)}`,
+                    );
+                    // 画面に「開始待ち」と出す
+                    this.setFollowingSchedule(true).catch(err => {
+                        this.log.system.error(err);
+                    });
+                }
+
+                // 予約終了時刻を過ぎても始まらない場合は再試行へ回す (ストリームを掴んだままにしない)
+                if (new Date().getTime() > this.reserve.endAt) {
+                    cleanup();
+                    reject(new Error(RecorderModel.WAITING_FOR_EVENT_ERROR));
+                }
+            };
+
+            stream.on('data', onData);
+        });
+    }
+
+    /**
      * 録画開始時の録画番組情報追加処理
      * @param recPath: RecFilePathInfo
      * @returns Promise<Recorded>
@@ -463,6 +673,8 @@ class RecorderModel implements IRecorderModel {
             videoFile.type = 'ts';
             videoFile.name = 'TS';
             videoFile.recordedId = this.recordedId;
+            // 録画ファイル先頭 (再生位置 0 秒) に対応する実時刻。実況コメントの時刻合わせに使用する
+            videoFile.startAt = new Date().getTime();
             this.log.system.info(`create video file: ${videoFile.filePath}`);
             this.videoFileId = await this.videoFileDB.insertOnce(videoFile);
             this.videoFileFulPath = recPath.fullPath;
@@ -558,6 +770,22 @@ class RecorderModel implements IRecorderModel {
         recorded.ruleId = this.reserve.ruleId;
         recorded.programId = this.reserve.programId;
         recorded.channelId = this.reserve.channelId;
+
+        /**
+         * 録画時点の放送局名を保持する
+         * 転居などで channel テーブルから放送局情報が失われても表示名を復元できるようにするため
+         */
+        try {
+            const channel = await this.channelDB.findId(this.reserve.channelId);
+            if (channel !== null) {
+                recorded.channelName = channel.name;
+                recorded.halfWidthChannelName = channel.halfWidthName;
+            }
+        } catch (err: any) {
+            this.log.system.warn(`get channel name error: ${this.reserve.channelId}`);
+            this.log.system.warn(err);
+        }
+
         recorded.startAt = this.reserve.startAt;
         recorded.endAt = this.reserve.endAt;
         recorded.duration = this.reserve.endAt - this.reserve.startAt;
@@ -776,6 +1004,18 @@ class RecorderModel implements IRecorderModel {
                 this.log.system.error(`update drop cnt error: ${this.dropLogFileId}`);
                 this.log.system.error(err);
             });
+
+        // ドロップ検出通知 (§7.3)
+        if (drop > 0 && this.recordedId !== null) {
+            void this.notification.dispatch('recording.dropped', {
+                recordedId: this.recordedId,
+                reserveId: this.reserve.id,
+                name: this.reserve.name,
+                dropCnt: drop,
+                errorCnt: error,
+                scramblingCnt: scrambling,
+            });
+        }
     }
 
     /**
@@ -858,6 +1098,14 @@ class RecorderModel implements IRecorderModel {
             });
         } else if (this.reserve.startAt !== newReserve.startAt || this.reserve.endAt !== newReserve.endAt) {
             // 時刻に変更がないか確認
+            // EPG 追従で予約時刻が動いたことを変更前後の時刻付きで記録する
+            this.log.system.info(
+                `reschedule recording: reserveId: ${newReserve.id}, programId: ${newReserve.programId},` +
+                    ` start: ${formatTimeChange(this.reserve.startAt, newReserve.startAt)},` +
+                    ` end: ${formatTimeChange(this.reserve.endAt, newReserve.endAt)},` +
+                    ` state: ${this.isRecording === true ? 'recording' : this.isPrepRecording === true ? 'preparing' : 'waiting'}`,
+            );
+
             // 録画処理が実行されていない場合
             if (this.isPrepRecording === false && this.isRecording === false) {
                 this.setTimer(newReserve, isSuppressLog);
@@ -869,7 +1117,10 @@ class RecorderModel implements IRecorderModel {
                     // TODO 録画中 or 録画準備中の開始時刻変更にも対応していない
                     if (this.reserve.endAt !== newReserve.endAt) {
                         // 時間指定予約で終了時刻に変更があった
-                        this.log.system.info(`change recording endAt: ${newReserve.id}`);
+                        this.log.system.info(
+                            `change recording endAt: ${newReserve.id},` +
+                                ` end: ${formatTimeChange(this.reserve.endAt, newReserve.endAt)}`,
+                        );
 
                         if (this.isPrepRecording === true) {
                             // 録画準備中なら録画中になるまで待つ
@@ -908,7 +1159,8 @@ class RecorderModel implements IRecorderModel {
                             // まだ録画準備中なのでキャンセルしてタイマーを再セット
                             this.log.system.info(
                                 `cancel prepare recording.`,
-                                `(reserveId: ${this.reserve.id}, programId: ${this.reserve.programId}, recordedId: ${this.recordedId})`,
+                                `(reserveId: ${this.reserve.id}, programId: ${this.reserve.programId}, recordedId: ${this.recordedId},` +
+                                    ` start: ${formatTimeChange(this.reserve.startAt, newReserve.startAt)})`,
                             );
                             await this._cancel().catch(err => {
                                 this.log.system.error(
@@ -925,7 +1177,8 @@ class RecorderModel implements IRecorderModel {
                             //  一度ストリームを開始した番組の開始時刻が変更されることはないのでここでは何もしない
                             this.log.system.info(
                                 `Ignores schedule changes because this program is already recording.`,
-                                ` (reserveId: ${this.reserve.id}, programId: ${this.reserve.programId}, recordedId: ${this.recordedId})`,
+                                ` (reserveId: ${this.reserve.id}, programId: ${this.reserve.programId}, recordedId: ${this.recordedId},` +
+                                    ` start: ${formatTimeChange(this.reserve.startAt, newReserve.startAt)})`,
                             );
                         }
                     }
@@ -1067,6 +1320,10 @@ namespace RecorderModel {
     export const CANCEL_EVENT = 'RecordingCancelEvent';
     export const START_RECORDING_EVENT = 'StartRecordingEvent';
     export const EVENT_RELAY_CHECK_TIME = 20 * 1000; // イベントリレーの確認時間 20秒
+    // 「番組がまだ始まっていない」ことを示すエラー。
+    // Mirakurun は EIT[p/f] で対象イベントが現在番組になるまでデータを流さないため、
+    // 前番組の延長 (放送時刻未定) 中はこの状態になる
+    export const WAITING_FOR_EVENT_ERROR = 'WaitingForEventStart';
 }
 
 export default RecorderModel;

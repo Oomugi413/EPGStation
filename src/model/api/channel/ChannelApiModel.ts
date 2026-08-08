@@ -2,6 +2,8 @@ import { inject, injectable } from 'inversify';
 import mirakurun from 'mirakurun';
 import * as apid from '../../../../api';
 import Channel from '../../../db/entities/Channel';
+import IBroadcastAffiliation from '../../channel/IBroadcastAffiliation';
+import IBroadcastRegion from '../../channel/IBroadcastRegion';
 import IChannelDB from '../../db/IChannelDB';
 import IMirakurunClientModel from '../../IMirakurunClientModel';
 import IChannelApiModel, { IChannelApiModelError } from './IChannelApiModel';
@@ -10,13 +12,19 @@ import IChannelApiModel, { IChannelApiModelError } from './IChannelApiModel';
 class ChannelApiModel implements IChannelApiModel {
     private channelDB: IChannelDB;
     private mirakurunClient: mirakurun;
+    private broadcastRegion: IBroadcastRegion;
+    private broadcastAffiliation: IBroadcastAffiliation;
 
     constructor(
         @inject('IChannelDB') channelDB: IChannelDB,
         @inject('IMirakurunClientModel') mirakurunClientModel: IMirakurunClientModel,
+        @inject('IBroadcastRegion') broadcastRegion: IBroadcastRegion,
+        @inject('IBroadcastAffiliation') broadcastAffiliation: IBroadcastAffiliation,
     ) {
         this.channelDB = channelDB;
         this.mirakurunClient = mirakurunClientModel.getClient();
+        this.broadcastRegion = broadcastRegion;
+        this.broadcastAffiliation = broadcastAffiliation;
     }
 
     /**
@@ -25,6 +33,8 @@ class ChannelApiModel implements IChannelApiModel {
      * @return Promise<ChannelItem[]>
      */
     public async getChannels(channelId: apid.ChannelId): Promise<apid.ChannelItem[]> {
+        await this.broadcastAffiliation.updateCache();
+
         let channels: Channel[] = [];
         if (!channelId) {
             channels = await this.channelDB.findAll(true);
@@ -50,6 +60,26 @@ class ChannelApiModel implements IChannelApiModel {
 
             if (c.remoteControlKeyId !== null) {
                 result.remoteControlKeyId = c.remoteControlKeyId;
+            }
+
+            // 地上波系は地域情報を付与する
+            const region = this.broadcastRegion.getRegion({
+                networkId: c.networkId,
+                serviceId: c.serviceId,
+                channelType: c.channelType,
+            });
+            if (region !== null) {
+                result.region = region;
+            }
+
+            // 地上波系は BIT から収集した系列情報を付与する (未受信の局は局名から同梱データで補う)
+            const affiliation = this.broadcastAffiliation.getAffiliation({
+                networkId: c.networkId,
+                channelType: c.channelType,
+                name: c.halfWidthName ?? c.name,
+            });
+            if (affiliation !== null) {
+                result.affiliation = affiliation;
             }
 
             return result;

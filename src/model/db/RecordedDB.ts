@@ -1,23 +1,43 @@
 import { inject, injectable } from 'inversify';
-import { In, IsNull, Not } from 'typeorm';
+import { DataSource, In, IsNull, Not, SelectQueryBuilder } from 'typeorm';
 import * as apid from '../../../api';
 import Recorded from '../../db/entities/Recorded';
+import RecordedSeriesLink from '../../db/entities/RecordedSeriesLink';
+import SeriesPendingMatch from '../../db/entities/SeriesPendingMatch';
 import Thumbnail from '../../db/entities/Thumbnail';
 import VideoFile from '../../db/entities/VideoFile';
-import StrUtil from '../../util/StrUtil';
+import { isFeatureEnabled } from '../FeatureFlags';
+import IConfiguration from '../IConfiguration';
+import RecordedKeywordSearch, { buildRecordedKeywordSearchPlan } from '../recorded/RecordedKeywordSearch';
 import IPromiseRetry from '../IPromiseRetry';
-import DBUtil from './DBUtil';
 import IDBOperator from './IDBOperator';
-import IRecordedDB, { FindAllOption, RecordedColumnOption } from './IRecordedDB';
+import IRecordedDB, {
+    FindAllOption,
+    RecordedChannelUpdateValues,
+    RecordedColumnOption,
+    RecordedProgramUpdateValues,
+    SeriesBackfillCandidateRow,
+    SeriesBackfillFilter,
+} from './IRecordedDB';
+import IRecordedTagDB from './IRecordedTagDB';
 
 @injectable()
 export default class RecordedDB implements IRecordedDB {
     private op: IDBOperator;
     private promieRetry: IPromiseRetry;
+    private config: IConfiguration;
+    private recordedTagDB: IRecordedTagDB;
 
-    constructor(@inject('IDBOperator') op: IDBOperator, @inject('IPromiseRetry') promieRetry: IPromiseRetry) {
+    constructor(
+        @inject('IDBOperator') op: IDBOperator,
+        @inject('IPromiseRetry') promieRetry: IPromiseRetry,
+        @inject('IConfiguration') config: IConfiguration,
+        @inject('IRecordedTagDB') recordedTagDB: IRecordedTagDB,
+    ) {
         this.op = op;
         this.promieRetry = promieRetry;
+        this.config = config;
+        this.recordedTagDB = recordedTagDB;
     }
 
     /**
@@ -36,9 +56,11 @@ export default class RecordedDB implements IRecordedDB {
         let hasError = false;
         try {
             // 削除
-            await queryRunner.manager.delete(Thumbnail, {});
-            await queryRunner.manager.delete(VideoFile, {});
-            await queryRunner.manager.delete(Recorded, {});
+            await queryRunner.manager.createQueryBuilder().delete().from(Thumbnail).execute();
+            await queryRunner.manager.createQueryBuilder().delete().from(VideoFile).execute();
+            await queryRunner.manager.createQueryBuilder().delete().from(RecordedSeriesLink).execute();
+            await queryRunner.manager.createQueryBuilder().delete().from(SeriesPendingMatch).execute();
+            await queryRunner.manager.createQueryBuilder().delete().from(Recorded).execute();
 
             // 挿入処理
             for (const item of items) {
@@ -81,6 +103,40 @@ export default class RecordedDB implements IRecordedDB {
     public async updateOnce(recorded: Recorded): Promise<void> {
         const connection = await this.op.getConnection();
         const queryBuilder = connection.createQueryBuilder().update(Recorded).set(recorded).where({ id: recorded.id });
+        await this.promieRetry.run(() => {
+            return queryBuilder.execute();
+        });
+    }
+
+    /**
+     * 放送局の情報 (channelId と表示名) を更新する。
+     * TS 解析で放送局が特定できた録画に対して使う
+     * @param recordedId: apid.RecordedId
+     * @param values: RecordedChannelUpdateValues
+     * @return Promise<void>
+     */
+    public async updateChannel(recordedId: apid.RecordedId, values: RecordedChannelUpdateValues): Promise<void> {
+        const connection = await this.op.getConnection();
+        const queryBuilder = connection.createQueryBuilder().update(Recorded).set(values).where({ id: recordedId });
+        await this.promieRetry.run(() => {
+            return queryBuilder.execute();
+        });
+    }
+
+    /**
+     * 指定した録画情報の番組情報 (概要・詳細・ジャンル・映像音声情報) を更新する。
+     * TS 解析から未設定の項目を補完する用途で使う
+     * @param recordedId: apid.RecordedId
+     * @param values: RecordedProgramUpdateValues 更新する項目だけを持つオブジェクト
+     * @return Promise<void>
+     */
+    public async updateProgramInfo(recordedId: apid.RecordedId, values: RecordedProgramUpdateValues): Promise<void> {
+        if (Object.keys(values).length === 0) {
+            return;
+        }
+
+        const connection = await this.op.getConnection();
+        const queryBuilder = connection.createQueryBuilder().update(Recorded).set(values).where({ id: recordedId });
         await this.promieRetry.run(() => {
             return queryBuilder.execute();
         });
@@ -190,6 +246,13 @@ export default class RecordedDB implements IRecordedDB {
      */
     public async deleteOnce(recordedId: apid.RecordedId): Promise<void> {
         const connection = await this.op.getConnection();
+        // シリーズ管理系の孤立行 (recorded_series_link / series_pending_match) を残さないよう先に削除する
+        await this.promieRetry.run(() => {
+            return connection.createQueryBuilder().delete().from(RecordedSeriesLink).where({ recordedId }).execute();
+        });
+        await this.promieRetry.run(() => {
+            return connection.createQueryBuilder().delete().from(SeriesPendingMatch).where({ recordedId }).execute();
+        });
         const queryBuilder = connection.createQueryBuilder().delete().from(Recorded).where({
             id: recordedId,
         });
@@ -335,40 +398,33 @@ export default class RecordedDB implements IRecordedDB {
             });
         }
 
-        // keyword
-        if (typeof option.keyword !== 'undefined') {
-            const keywords = StrUtil.toHalf(option.keyword).split(/ /);
-            const like = this.op.getLikeStr(false);
-            const valueBaseName = 'keyword';
-
-            const nameAnd: string[] = [];
-            const descriptionAnd: string[] = [];
-            const values: any = {};
-            keywords.forEach((str, i) => {
-                str = `%${str}%`;
-
-                // value
-                const valueName = `${valueBaseName}Name${i}`;
-                values[valueName] = str;
-
-                // name
-                nameAnd.push(`halfWidthName ${like} :${valueName}`);
-                // description
-                descriptionAnd.push(`halfWidthDescription ${like} :${valueName}`);
-            });
-
-            const or: string[] = [];
-            if (nameAnd.length > 0) {
-                or.push(`(${DBUtil.createAndQuery(nameAnd)})`);
-            }
-            if (descriptionAnd.length > 0) {
-                or.push(`(${DBUtil.createAndQuery(descriptionAnd)})`);
+        // tagId (advancedSearch 有効時は子孫タグの録画も含める)
+        if (typeof option.tagId !== 'undefined') {
+            let tagIds: number[] = [option.tagId];
+            if (isFeatureEnabled(this.config.getConfig(), 'advancedSearch')) {
+                const descendantIds = await this.recordedTagDB.getDescendantIds(option.tagId);
+                tagIds = [option.tagId, ...descendantIds];
             }
 
             querys.push({
-                query: DBUtil.createOrQuery(or),
-                values: values,
+                query:
+                    `exists (select 1 from ${RecordedKeywordSearch.TAG_RELATION_TABLE} tagFilter_rel` +
+                    ' where tagFilter_rel.recordedId = recorded.id' +
+                    ' and tagFilter_rel.recordedTagId in (:...tagFilterIds))',
+                values: {
+                    tagFilterIds: tagIds,
+                },
             });
+        }
+
+        // keyword
+        if (typeof option.keyword !== 'undefined') {
+            const searchPlan = buildRecordedKeywordSearchPlan(
+                option.keyword,
+                this.op.getLikeStr(false),
+                isFeatureEnabled(this.config.getConfig(), 'advancedSearch'),
+            );
+            querys.push(...searchPlan.conditions);
         }
 
         // オリジナルファイルだけを抽出する
@@ -479,6 +535,33 @@ export default class RecordedDB implements IRecordedDB {
     }
 
     /**
+     * 外部録画ファイル取り込み時の重複検出用に、指定した channelId + 時刻 (許容誤差付き) に一致する recorded を探す
+     * @param channelId: apid.ChannelId
+     * @param startAt: number 開始時刻 (UnixTime ms)
+     * @param toleranceMs: number 許容する時刻差 (ms)
+     * @return Promise<Recorded[]>
+     */
+    public async findDuplicateCandidates(
+        channelId: apid.ChannelId,
+        startAt: number,
+        toleranceMs: number,
+    ): Promise<Recorded[]> {
+        const connection = await this.op.getConnection();
+
+        const queryBuilder = connection
+            .getRepository(Recorded)
+            .createQueryBuilder('recorded')
+            .where('recorded.channelId = :channelId', { channelId })
+            .andWhere('recorded.startAt >= :from', { from: startAt - toleranceMs })
+            .andWhere('recorded.startAt <= :to', { to: startAt + toleranceMs })
+            .leftJoinAndSelect('recorded.videoFiles', 'videoFiles');
+
+        return await this.promieRetry.run(() => {
+            return queryBuilder.getMany();
+        });
+    }
+
+    /**
      * 一番古い番組を返す
      * @return Promise<Recorded | null>
      */
@@ -524,5 +607,110 @@ export default class RecordedDB implements IRecordedDB {
         return await this.promieRetry.run(() => {
             return queryBuilder.getMany();
         });
+    }
+
+    /**
+     * シリーズ化バックフィル用に録画を id 昇順でチャンク取得する (録画中のものは除く)
+     * @param afterId: number
+     * @param limit: number
+     * @return Promise<SeriesBackfillCandidateRow[]>
+     */
+    public async findForSeriesBackfill(
+        afterId: number,
+        limit: number,
+        filter: SeriesBackfillFilter = {},
+    ): Promise<SeriesBackfillCandidateRow[]> {
+        const connection = await this.op.getConnection();
+
+        const queryBuilder = this.createSeriesBackfillQuery(connection, afterId, filter)
+            .select(['recorded.id', 'recorded.name', 'recorded.channelId', 'recorded.startAt'])
+            .orderBy('recorded.id', 'ASC')
+            .limit(limit);
+
+        const rows = await this.promieRetry.run(() => {
+            return queryBuilder.getMany();
+        });
+
+        return rows.map(row => ({
+            id: row.id,
+            name: row.name,
+            channelId: row.channelId,
+            startAt: row.startAt,
+        }));
+    }
+
+    /**
+     * シリーズ化バックフィルの残件数を取得する
+     * @param afterId: number
+     * @param filter: SeriesBackfillFilter
+     * @return Promise<number>
+     */
+    public async countForSeriesBackfill(afterId: number, filter: SeriesBackfillFilter = {}): Promise<number> {
+        const connection = await this.op.getConnection();
+        const queryBuilder = this.createSeriesBackfillQuery(connection, afterId, filter);
+
+        return await this.promieRetry.run(() => {
+            return queryBuilder.getCount();
+        });
+    }
+
+    /**
+     * 直近 (id 降順) の録画 count 件のうち最も小さい id を返す
+     * @param count: number
+     * @return Promise<number> 対象が無い場合は 0
+     */
+    public async findSeriesBackfillFloorId(count: number): Promise<number> {
+        if (count <= 0) {
+            return 0;
+        }
+
+        const connection = await this.op.getConnection();
+        const queryBuilder = connection
+            .getRepository(Recorded)
+            .createQueryBuilder('recorded')
+            .select(['recorded.id'])
+            .where('recorded.isRecording = :isRecording', { isRecording: false })
+            .orderBy('recorded.id', 'DESC')
+            .limit(count);
+
+        const rows = await this.promieRetry.run(() => {
+            return queryBuilder.getMany();
+        });
+
+        return rows.length === 0 ? 0 : rows[rows.length - 1].id;
+    }
+
+    /**
+     * シリーズ化バックフィルの対象を絞り込んだクエリビルダを作る
+     * @param connection: DataSource
+     * @param afterId: number
+     * @param filter: SeriesBackfillFilter
+     * @return SelectQueryBuilder<Recorded>
+     */
+    private createSeriesBackfillQuery(
+        connection: DataSource,
+        afterId: number,
+        filter: SeriesBackfillFilter,
+    ): SelectQueryBuilder<Recorded> {
+        const queryBuilder = connection
+            .getRepository(Recorded)
+            .createQueryBuilder('recorded')
+            .where('recorded.id > :afterId', { afterId })
+            .andWhere('recorded.isRecording = :isRecording', { isRecording: false });
+
+        if (typeof filter.minId === 'number' && filter.minId > 0) {
+            queryBuilder.andWhere('recorded.id >= :minId', { minId: filter.minId });
+        }
+
+        if (filter.onlyUnlinked === true) {
+            // まだシリーズへリンクされていない録画だけに絞る (DB 側で弾くことで走査自体を減らす)
+            queryBuilder.andWhere(qb => {
+                const sub = qb.subQuery().select('link.recordedId').from(RecordedSeriesLink, 'link').getQuery();
+
+                return `recorded.id NOT IN ${sub}`;
+            });
+        }
+
+        return queryBuilder;
     }
 }

@@ -6,14 +6,20 @@ import * as api from '../../../../../api';
 export const get: Operation = async (req, res) => {
     const streamApiModel = container.get<IStreamApiModel>('IStreamApiModel');
 
+    const streamOption = api.parseStreamModeOrProfile(req, res);
+    if (streamOption === null) {
+        return;
+    }
+
     try {
         if (typeof req.headers.host === 'undefined') {
             throw new Error('HostIsUndefined');
         }
 
         const playlist = await streamApiModel.getLiveM2TsStreamM3u8(req.headers.host, api.isSecureProtocol(req), {
-            channelId: parseInt(req.params.channelId, 10),
-            mode: parseInt(req.query.mode as string, 10),
+            channelId: api.parseRequestParamInt(req.params.channelId, 'channelId'),
+            mode: streamOption.mode,
+            profile: streamOption.profile,
         });
 
         if (playlist === null) {
@@ -24,8 +30,8 @@ export const get: Operation = async (req, res) => {
         } else {
             api.responsePlayList(req, res, playlist);
         }
-    } catch (err: any) {
-        api.responseServerError(res, err.message);
+    } catch (err: unknown) {
+        api.responseServerError(res, api.getErrorMessage(err));
     }
 };
 
@@ -39,6 +45,9 @@ get.apiDoc = {
         },
         {
             $ref: '#/components/parameters/StreamMode',
+        },
+        {
+            $ref: '#/components/parameters/StreamProfile',
         },
     ],
     responses: {

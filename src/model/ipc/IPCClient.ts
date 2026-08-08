@@ -4,19 +4,30 @@ import * as apid from '../../../api';
 import { OperatorFinishEncodeInfo } from '../event/IOperatorEncodeEvent';
 import ILogger from '../ILogger';
 import ILoggerModel from '../ILoggerModel';
-import { AddVideoFileOption, UploadedVideoFileOption } from '../operator/recorded/IRecordedManageModel';
+import { ImportJobId } from '../operator/recorded/IImportJobManageModel';
+import {
+    AddVideoFileOption,
+    ImportedExternalRecordedFileOption,
+    UploadedVideoFileOption,
+} from '../operator/recorded/IRecordedManageModel';
+import { SeriesBackfillOption } from '../operator/series/ISeriesBackfillManageModel';
 import IEncodeManageModel from '../service/encode/IEncodeManageModel';
 import ISocketIOManageModel from '../service/socketio/ISocketIOManageModel';
 import IIPCClient, {
+    IPCAppSettingManageModel,
     IPCOperatorEncodeEvent,
     IPCRecordedManageModel,
     IPCRecordedTagManageModel,
     IPCRecordingManageModel,
     IPCReservationManageModel,
     IPCRuleManageModel,
+    IPCSeriesManageModel,
+    IPCUpdateManageModel,
     IPCThumbnailManageModel,
 } from './IIPCClient';
 import {
+    AppSettingFunctions,
+    UpdateFunctions,
     ClientMessageOption,
     OperatorEncodeEventFunctions,
     ModelName,
@@ -29,6 +40,7 @@ import {
     ReserveationFunctions,
     RuleFuntions,
     SendMessage,
+    SeriesFunctions,
     ThumbnailFunctions,
 } from './IPCMessageDefine';
 
@@ -43,6 +55,9 @@ export default class IPCClient implements IIPCClient {
     public rule!: IPCRuleManageModel;
     public thumbnail!: IPCThumbnailManageModel;
     public encodeEvent!: IPCOperatorEncodeEvent;
+    public series!: IPCSeriesManageModel;
+    public appSetting!: IPCAppSettingManageModel;
+    public update!: IPCUpdateManageModel;
 
     private log: ILogger;
     private listener: events.EventEmitter = new events.EventEmitter();
@@ -68,6 +83,9 @@ export default class IPCClient implements IIPCClient {
         this.setRule();
         this.setThumbnail();
         this.setEncodeEvent();
+        this.setSeries();
+        this.setAppSetting();
+        this.setUpdate();
     }
 
     /**
@@ -81,6 +99,10 @@ export default class IPCClient implements IIPCClient {
             } else if ((<ParentMessage>msg).type === 'notifyClient') {
                 // socket.io によるクライアントへの状態更新通知
                 this.socketIO.notifyClient();
+            } else if ((<ParentMessage>msg).type === 'notifyOnAirProgram') {
+                // EIT[p/f] 相当の更新通知 (視聴画面・番組表の即時更新用)
+                const channelIds = (<any>msg).value?.channelIds;
+                if (Array.isArray(channelIds) === true) this.socketIO.notifyOnAirProgramUpdated(channelIds);
             } else if ((<ParentMessage>msg).type === 'pushEncode') {
                 // エンコード依頼
                 this.encodeManage.push((<PushEncodeMessage>msg).value);
@@ -297,6 +319,15 @@ export default class IPCClient implements IIPCClient {
                     },
                 });
             },
+            getCleanupInfo: () => {
+                return this.send<apid.RecordedCleanupInfo>(
+                    {
+                        model: ModelName.recorded,
+                        func: RecordedFunctions.getCleanupInfo,
+                    },
+                    0, // タイムアウトなし (ディレクトリ探索に時間がかかる場合がある)
+                );
+            },
             videoFileCleanup: () => {
                 return this.send(
                     {
@@ -315,6 +346,33 @@ export default class IPCClient implements IIPCClient {
                     0, // タイムアウトなし
                 );
             },
+            startImportJob: (items: ImportedExternalRecordedFileOption[]) => {
+                return this.send<ImportJobId>({
+                    model: ModelName.recorded,
+                    func: RecordedFunctions.startImportJob,
+                    args: {
+                        items: items,
+                    },
+                });
+            },
+            getImportJobStatus: (jobId: ImportJobId) => {
+                return this.send({
+                    model: ModelName.recorded,
+                    func: RecordedFunctions.getImportJobStatus,
+                    args: {
+                        jobId: jobId,
+                    },
+                });
+            },
+            retryImportJob: (jobId: ImportJobId) => {
+                return this.send<ImportJobId | null>({
+                    model: ModelName.recorded,
+                    func: RecordedFunctions.retryImportJob,
+                    args: {
+                        jobId: jobId,
+                    },
+                });
+            },
         };
     }
 
@@ -323,17 +381,18 @@ export default class IPCClient implements IIPCClient {
      */
     private setRecordedTag(): void {
         this.recordedTag = {
-            create: (name: string, color: string) => {
+            create: (name: string, color: string, parentId?: number | null) => {
                 return this.send({
                     model: ModelName.recordedTag,
                     func: RecordedTagFunctions.create,
                     args: {
                         name: name,
                         color: color,
+                        parentId: parentId,
                     },
                 });
             },
-            update: (tagId: apid.RecordedTagId, name: string, color: string) => {
+            update: (tagId: apid.RecordedTagId, name: string, color: string, parentId?: number | null) => {
                 return this.send({
                     model: ModelName.recordedTag,
                     func: RecordedTagFunctions.update,
@@ -341,6 +400,7 @@ export default class IPCClient implements IIPCClient {
                         tagId: tagId,
                         name: name,
                         color: color,
+                        parentId: parentId,
                     },
                 });
             },
@@ -503,6 +563,94 @@ export default class IPCClient implements IIPCClient {
                         info: info,
                     },
                 });
+            },
+        };
+    }
+
+    /**
+     * set series (backfill)
+     */
+    private setSeries(): void {
+        this.series = {
+            startBackfill: (option: SeriesBackfillOption) => {
+                return this.send(
+                    {
+                        model: ModelName.series,
+                        func: SeriesFunctions.startBackfill,
+                        args: {
+                            option: option,
+                        },
+                    },
+                    0, // タイムアウトなし (バックグラウンドで開始するだけなので即座に返るが念のため)
+                );
+            },
+            getBackfillStatus: () => {
+                return this.send({
+                    model: ModelName.series,
+                    func: SeriesFunctions.getBackfillStatus,
+                });
+            },
+            cancelBackfill: () => {
+                return this.send({
+                    model: ModelName.series,
+                    func: SeriesFunctions.cancelBackfill,
+                });
+            },
+            analyze: (recordedId: apid.RecordedId) => {
+                return this.send({
+                    model: ModelName.series,
+                    func: SeriesFunctions.analyze,
+                    args: {
+                        recordedId: recordedId,
+                    },
+                });
+            },
+        };
+    }
+
+    /**
+     * set app setting (hot reload) functions
+     */
+    private setAppSetting(): void {
+        this.appSetting = {
+            notifyChanged: (keys: string[]) => {
+                // fire-and-forget: 応答を待たず、失敗してもログに残すだけで呼び出し元には影響させない
+                this.send(
+                    {
+                        model: ModelName.appSetting,
+                        func: AppSettingFunctions.notifyChanged,
+                        args: { keys },
+                    },
+                    0,
+                ).catch(err => {
+                    this.log.system.error('failed to notify app setting change to operator process');
+                    this.log.system.error(err);
+                });
+            },
+        };
+    }
+
+    /**
+     * set update functions
+     * 更新は git 操作・ビルド・プロセス再起動を伴うため Operator 側で実行する
+     */
+    private setUpdate(): void {
+        this.update = {
+            getStatus: () => {
+                return this.send({ model: ModelName.update, func: UpdateFunctions.getStatus });
+            },
+            check: () => {
+                // GitHub への問い合わせを伴うため既定より長めに待つ
+                return this.send({ model: ModelName.update, func: UpdateFunctions.check }, 60 * 1000);
+            },
+            run: (option: apid.RunUpdateOption) => {
+                return this.send({ model: ModelName.update, func: UpdateFunctions.run, args: { option } });
+            },
+            getJob: () => {
+                return this.send({ model: ModelName.update, func: UpdateFunctions.getJob });
+            },
+            restart: () => {
+                return this.send({ model: ModelName.update, func: UpdateFunctions.restart });
             },
         };
     }

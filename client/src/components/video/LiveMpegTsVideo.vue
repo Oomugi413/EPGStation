@@ -1,149 +1,148 @@
 <template>
-    <video ref="video" autoplay playsinline></video>
+    <div ref="container" class="dplayer-wrap"></div>
 </template>
 
 <script lang="ts">
 import BaseVideo from '@/components/video/BaseVideo';
 import container from '@/model/ModelContainer';
 import ISnackbarState from '@/model/state/snackbar/ISnackbarState';
-import * as aribb24js from 'aribb24.js';
-import { Component, Prop } from 'vue-property-decorator';
-import Mpegts from 'mpegts.js';
-import HLSUtil from '@/util/HLSUtil';
+import DPlayerUtil from '@/util/DPlayerUtil';
+import StreamQualityUtil from '@/util/StreamQualityUtil';
+import StreamSupportUtil from '@/util/StreamSupportUtil';
+import UaUtil from '@/util/UaUtil';
+import Util from '@/util/Util';
+import { DPlayerType } from 'dplayer';
+import { Component, Prop, toNative } from 'vue-facing-decorator';
+import * as apid from '../../../../api';
 
 @Component({})
-export default class LiveMpegTsVideo extends BaseVideo {
+class LiveMpegTsVideo extends BaseVideo {
     @Prop({ required: true })
     public videoSrc!: string;
 
+    @Prop({ default: null })
+    public channelId!: apid.ChannelId | null;
+
+    @Prop({ default: 0 })
+    public mode!: number;
+
+    @Prop({ default: null })
+    public jikkyoChannelId!: string | null;
+
     private snackbarState: ISnackbarState = container.get<ISnackbarState>('ISnackbarState');
-    private mepgtsPlayer: Mpegts.Player | null = null;
-    private captionRenderer: aribb24js.CanvasRenderer | null = null;
-    private superimposeRenderer: aribb24js.CanvasRenderer | null = null;
 
     public mounted(): void {
         super.mounted();
     }
 
-    public async beforeDestroy(): Promise<void> {
-        if (this.mepgtsPlayer !== null) {
-            this.mepgtsPlayer.pause();
-            this.mepgtsPlayer.unload();
-            this.mepgtsPlayer.destroy();
-            this.mepgtsPlayer = null;
-        }
+    /**
+     * ニコニコ実況の実況チャンネル ID を返す
+     */
+    protected getJikkyoChannelId(): string | null {
+        return this.jikkyoChannelId;
+    }
 
-        if (this.captionRenderer !== null) {
-            this.captionRenderer.detachMedia();
-            this.captionRenderer.dispose();
-            this.captionRenderer = null;
-        }
+    /**
+     * 視聴中の放送局 id を返す
+     * 実況コメントの遅延補正で、配信中の映像の放送時刻を引くのに使う
+     */
+    protected getChannelId(): apid.ChannelId | null {
+        return this.channelId;
+    }
 
-        if (this.superimposeRenderer !== null) {
-            this.superimposeRenderer.detachMedia();
-            this.superimposeRenderer.dispose();
-            this.superimposeRenderer = null;
-        }
+    /**
+     * データ放送 (BML) の接続パラメータ
+     */
+    public getDataBroadcastingParam() {
+        return this.channelId === null ? null : { type: 'epgStationLive' as const, channelId: this.channelId };
+    }
 
-        super.beforeDestroy();
+    public async beforeUnmount(): Promise<void> {
+        super.beforeUnmount();
     }
 
     /**
      * video 再生初期設定
      */
     protected initVideoSetting(): void {
-        // 対応しているか確認
-        if (Mpegts.isSupported() === false || Mpegts.getFeatureList().mseLivePlayback === false) {
+        if (this.containerElement === null) {
+            return;
+        }
+
+        // 対応しているか確認 (MMS 対応・iOS 26 以降のホーム画面 Web App 等の既知不具合も含む)
+        const m2tsllSupport = StreamSupportUtil.checkM2TSLLSupport();
+        if (m2tsllSupport.isSupported === false) {
             this.snackbarState.open({
                 color: 'error',
-                text: '非対応ブラウザーです。',
+                text: m2tsllSupport.reason ?? '非対応ブラウザーです。',
             });
 
             throw new Error('UnsupportedBrowser');
         }
 
-        if (this.video === null) {
-            this.snackbarState.open({
-                color: 'error',
-                text: 'video 要素がありません。',
-            });
-            throw new Error('VideoIsNull');
-        }
+        DPlayerUtil.setupGlobals();
 
-        // mpegts.js の設定
-        Mpegts.LoggingControl.enableVerbose = true;
-        const mpegtsConfig: Mpegts.Config = {
-            enableWorker: true,
-            liveBufferLatencyChasing: true,
-            liveBufferLatencyMinRemain: 1.0,
-            liveBufferLatencyMaxLatency: 2.0,
-        };
-        this.mepgtsPlayer = Mpegts.createPlayer(
-            {
-                type: 'mse',
-                isLive: true,
-                url: this.videoSrc,
+        // プレイヤー上から解像度 (エンコード設定) を動的に切り替えられるよう
+        // config の m2tsll 設定一覧から DPlayer の quality リストを生成する
+        const qualities = this.createQualityList();
+
+        const options: DPlayerType.Options = {
+            container: this.containerElement,
+            // Safari / iOS では音声付き自動再生がポリシーにより停止されるため、
+            // 再生ボタンの明示的な操作でのみ再生を開始する
+            autoplay: UaUtil.isSafari() === false && UaUtil.isiOS() === false,
+            live: true,
+            hotkey: true,
+            video:
+                qualities.length > 0
+                    ? ({
+                          quality: qualities,
+                          defaultQuality: this.mode < qualities.length ? this.mode : 0,
+                      } as DPlayerType.Options['video'])
+                    : {
+                          url: this.videoSrc,
+                          type: 'mpegts',
+                      },
+            subtitle: {
+                type: 'aribb24',
             },
-            mpegtsConfig,
-        );
+            pluginOptions: {
+                mpegts: {
+                    config: {
+                        enableWorker: true,
+                        // 低遅延: 再生位置が遅延したら自動で追いかける
+                        liveBufferLatencyChasing: true,
+                        liveBufferLatencyMinRemain: 0.5,
+                        liveBufferLatencyMaxLatency: 2.0,
+                        // 長時間視聴でのメモリ増加対策: 再生済みバッファを自動解放する
+                        autoCleanupSourceBuffer: true,
+                        autoCleanupMaxBackwardDuration: 30,
+                        autoCleanupMinBackwardDuration: 15,
+                    },
+                },
+                aribb24: DPlayerUtil.createAribb24Options(),
+            },
+        };
 
-        this.mepgtsPlayer.attachMediaElement(this.video);
-        this.mepgtsPlayer.load();
-        this.mepgtsPlayer.play();
-
-        // 字幕対応
-        const captionOption = HLSUtil.getAribb24BaseOption();
-        captionOption.data_identifer = 0x80;
-        this.captionRenderer = new aribb24js.CanvasRenderer(captionOption);
-
-        const superimposeOption = HLSUtil.getAribb24BaseOption();
-        superimposeOption.data_identifer = 0x81;
-        this.superimposeRenderer = new aribb24js.CanvasRenderer(superimposeOption);
-
-        this.captionRenderer.attachMedia(this.video);
-        this.superimposeRenderer.attachMedia(this.video);
-
-        /**
-         * 字幕スーパー用の処理
-         * 元のソースは下記参照
-         * https://twitter.com/magicxqq/status/1381813912539066373
-         * https://github.com/l3tnun/EPGStation/commit/352bf9a69fdd0848295afb91859e1a402b623212#commitcomment-50407815
-         */
-        this.mepgtsPlayer.on(Mpegts.Events.PES_PRIVATE_DATA_ARRIVED, data => {
-            if (data.stream_id === 0xbd && data.data[0] === 0x80 && this.captionRenderer !== null) {
-                // private_stream_1, caption
-                this.captionRenderer.pushData(data.pid, data.data, data.pts / 1000);
-            } else if (data.stream_id === 0xbf && this.superimposeRenderer !== null) {
-                // private_stream_2, superimpose
-                let payload = data.data;
-                if (payload[0] !== 0x81) {
-                    payload = this.parseMalformedPES(data.data);
-                }
-                if (payload[0] !== 0x81) {
-                    return;
-                }
-                this.superimposeRenderer.pushData(data.pid, payload, data.nearest_pts / 1000);
-            }
-        });
+        this.createPlayer(options);
     }
 
     /**
-     * 字幕スーパー用の処理
-     * 元のソースは下記参照
-     * https://twitter.com/magicxqq/status/1381813912539066373
-     * https://github.com/l3tnun/EPGStation/commit/352bf9a69fdd0848295afb91859e1a402b623212#commitcomment-50407815
+     * config の m2tsll 設定から DPlayer の quality リストを生成する
+     * @return DPlayerType.VideoQuality[]
      */
-    private parseMalformedPES(data: any): any {
-        let pes_scrambling_control = (data[0] & 0x30) >>> 4;
-        let pts_dts_flags = (data[1] & 0xc0) >>> 6;
-        let pes_header_data_length = data[2];
+    private createQualityList(): DPlayerType.VideoQuality[] {
+        if (this.channelId === null) {
+            return [];
+        }
 
-        let payload_start_index = 3 + pes_header_data_length;
-        let payload_length = data.byteLength - payload_start_index;
-
-        let payload = data.subarray(payload_start_index, payload_start_index + payload_length);
-
-        return payload;
+        return StreamQualityUtil.getLiveModeNames('m2tsll').map((name, mode) => {
+            return {
+                name: name,
+                url: `${window.location.origin}${Util.getSubDirectory()}/api/streams/live/${this.channelId}/m2tsll?mode=${mode}`,
+                type: 'mpegts',
+            };
+        });
     }
 
     /**
@@ -169,34 +168,7 @@ export default class LiveMpegTsVideo extends BaseVideo {
     public setCurrentTime(time: number): void {
         return;
     }
-
-    /**
-     * 字幕を表示させる
-     */
-    public showSubtitle(): void {
-        super.showSubtitle();
-        if (this.captionRenderer !== null) {
-            this.captionRenderer.show();
-        }
-
-        if (this.superimposeRenderer !== null) {
-            this.superimposeRenderer.show();
-        }
-    }
-
-    /**
-     * 字幕を非表示にする
-     */
-    public disabledSubtitle(): void {
-        super.disabledSubtitle();
-
-        if (this.captionRenderer !== null) {
-            this.captionRenderer.hide();
-        }
-
-        if (this.superimposeRenderer !== null) {
-            this.superimposeRenderer.hide();
-        }
-    }
 }
+
+export default toNative(LiveMpegTsVideo);
 </script>

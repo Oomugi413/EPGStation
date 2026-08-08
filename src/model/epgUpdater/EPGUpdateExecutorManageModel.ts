@@ -1,6 +1,7 @@
 import * as child_process from 'child_process';
 import { inject, injectable } from 'inversify';
 import * as path from 'path';
+import { isShuttingDown, registerChildProcess } from '../../util/ChildProcessRegistry';
 import IEPGUpdateEvent from '../event/IEPGUpdateEvent';
 import ILogger from '../ILogger';
 import ILoggerModel from '../ILoggerModel';
@@ -28,6 +29,9 @@ export default class EPGUpdateExecutorManageModel implements IEPGUpdateExecutorM
             stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
         });
 
+        // Operator が自分で終了するとき (再起動・更新) にまとめて止められるようにする
+        registerChildProcess(executor);
+
         this.log.system.info(`start epg updater pid: ${executor.pid}`);
 
         // epg 更新完了
@@ -35,6 +39,12 @@ export default class EPGUpdateExecutorManageModel implements IEPGUpdateExecutorM
             if ((<any>msg).msg === 'updated') {
                 // epg 更新完了イベントを発行
                 this.epgUpdateEvent.emitUpdated();
+            } else if ((<any>msg).msg === 'onAirProgramUpdated') {
+                // EIT[p/f] 相当の更新 (視聴画面・番組表へ即時反映させる)
+                const channelIds = (<any>msg).channelIds;
+                if (Array.isArray(channelIds) === true && channelIds.length > 0) {
+                    this.epgUpdateEvent.emitOnAirProgramUpdated(channelIds);
+                }
             }
         });
         /**
@@ -80,6 +90,11 @@ export default class EPGUpdateExecutorManageModel implements IEPGUpdateExecutorM
      */
     private restart(executor: child_process.ChildProcess): void {
         if (this.isRestarting === true) {
+            return;
+        }
+
+        // Operator 自身の終了処理で止めた場合は落ちたわけではないので起こし直さない
+        if (isShuttingDown() === true) {
             return;
         }
 

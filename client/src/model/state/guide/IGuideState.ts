@@ -2,6 +2,8 @@ import * as apid from '../../../../../api';
 
 export interface FetchGuideOption {
     type?: apid.ChannelType;
+    region?: apid.BroadcastRegionId; // 地域別番組表の地域 id
+    affiliation?: apid.BroadcastAffiliationId; // 系列別番組表の系列 id
     channelId?: apid.ChannelId;
     time?: string; // YYMMddhh
     length: number;
@@ -36,6 +38,7 @@ export default interface IGuideState {
     clearDate(): void;
     setDisplayRange(baseSize: DisplayRange): void;
     fetchGuide(option: FetchGuideOption): Promise<void>;
+    appendGuide(option: FetchGuideOption): Promise<boolean>;
     createProgramDoms(isSingleStation: boolean): void;
     updateVisible(): void;
     updateGenre(): void;

@@ -34,6 +34,8 @@ export default class RecordedDetailSelectStreamState implements IRecordedDetailS
         this.title = videoFile.name;
         this.videoFileId = videoFile.id;
         this.recordedId = recordedId;
+        // 同じ画面で続けて開いても選択肢が積み重ならないよう毎回作り直す
+        this.streamTypeItems = [];
         this.streamModeItems = [];
         this.streamConfig = {};
         const config = this.serverConfig.getConfig();
@@ -83,6 +85,11 @@ export default class RecordedDetailSelectStreamState implements IRecordedDetailS
                 throw new Error('VideoTypeError');
             }
 
+            // 前回の選択が今回のビデオ形式に存在しない場合 (ts ⇔ encoded の切り替え) は選び直す
+            if (typeof this.selectedStreamType !== 'undefined' && this.streamTypeItems.includes(this.selectedStreamType) === false) {
+                this.selectedStreamType = undefined;
+            }
+
             if (typeof this.selectedStreamType === 'undefined') {
                 const savedType = this.streamSelectSetting.getSavedValue().type;
                 const newSelectedStreamType = this.streamTypeItems.find(type => {
@@ -115,7 +122,7 @@ export default class RecordedDetailSelectStreamState implements IRecordedDetailS
     public updateModeItems(isInit: boolean = false): void {
         this.streamModeItems = this.getModeItems().map((text, i) => {
             return {
-                text: text,
+                title: text,
                 value: i,
             };
         });

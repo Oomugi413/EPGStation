@@ -8,7 +8,7 @@ export const get: Operation = async (req, res) => {
 
     let isClosed: boolean = false;
     let result: StreamResponse;
-    let keepTimer: NodeJS.Timer;
+    let keepTimer: ReturnType<typeof setTimeout>;
 
     const stop = async () => {
         clearInterval(keepTimer);
@@ -20,21 +20,32 @@ export const get: Operation = async (req, res) => {
         await streamApiModel.stop(result.streamId, true);
     };
 
-    req.on('close', async () => {
+    // req の close は GET リクエスト本文の受信完了でも発火し得るため使用しない。
+    // クライアントが実際に切断した場合だけ、出力レスポンス側でストリームを停止する。
+    res.on('close', async () => {
+        if (res.writableEnded === true) {
+            return;
+        }
         isClosed = true;
         await stop();
     });
 
+    const streamOption = api.parseStreamModeOrProfile(req, res);
+    if (streamOption === null) {
+        return;
+    }
+
     try {
         result = await streamApiModel.startLiveM2TsLLStream({
-            channelId: parseInt(req.params.channelId, 10),
-            mode: parseInt(req.query.mode as string, 10),
+            channelId: api.parseRequestParamInt(req.params.channelId, 'channelId'),
+            mode: streamOption.mode,
+            profile: streamOption.profile,
         });
         keepTimer = setInterval(() => {
             streamApiModel.keep(result.streamId);
         }, 10 * 1000);
-    } catch (err: any) {
-        api.responseServerError(res, err.message);
+    } catch (err: unknown) {
+        api.responseStreamStartError(res, err);
 
         return;
     }
@@ -71,6 +82,9 @@ get.apiDoc = {
         },
         {
             $ref: '#/components/parameters/StreamMode',
+        },
+        {
+            $ref: '#/components/parameters/StreamProfile',
         },
     ],
     responses: {

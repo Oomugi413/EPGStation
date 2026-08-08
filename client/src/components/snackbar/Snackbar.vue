@@ -5,8 +5,11 @@
                 <div class="d-flex justify-center" style="position: relative">
                     <div class="d-flex align-center snackbar" v-bind:class="snackbarClass">
                         <div class="text">{{ snackbarState.mainText }}</div>
+                        <div v-if="snackbarState.action !== null" class="ma-0 mr-2">
+                            <v-btn variant="text" size="small" color="white" class="button" v-on:click="onClickAction">{{ snackbarState.action.text }}</v-btn>
+                        </div>
                         <div class="ma-0 mr-2">
-                            <v-btn text small color="white" class="button" v-on:click="onClose">閉じる</v-btn>
+                            <v-btn variant="text" size="small" color="white" class="button" v-on:click="onClose">閉じる</v-btn>
                         </div>
                     </div>
                 </div>
@@ -18,10 +21,10 @@
 <script lang="ts">
 import container from '@/model/ModelContainer';
 import ISnackbarState from '@/model/state/snackbar/ISnackbarState';
-import { Component, Prop, Vue } from 'vue-property-decorator';
+import { Component, Prop, Vue, toNative } from 'vue-facing-decorator';
 
 @Component({})
-export default class Snackbar extends Vue {
+class Snackbar extends Vue {
     public snackbarState: ISnackbarState = container.get<ISnackbarState>('ISnackbarState');
 
     get snackbarClass(): any {
@@ -38,7 +41,17 @@ export default class Snackbar extends Vue {
     public onClose(): void {
         this.snackbarState.close();
     }
+
+    public async onClickAction(): Promise<void> {
+        const action = this.snackbarState.action;
+        this.snackbarState.close();
+        if (action !== null) {
+            await action.onClick();
+        }
+    }
 }
+
+export default toNative(Snackbar);
 </script>
 
 <style lang="sass" scoped>

@@ -1,6 +1,6 @@
 import { inject, injectable } from 'inversify';
 import { FindOptionsWhere } from 'typeorm';
-import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
+import type { QueryDeepPartialEntity } from 'typeorm';
 import * as apid from '../../../api';
 import * as mapid from '../../../node_modules/mirakurun/api';
 import Channel from '../../db/entities/Channel';
@@ -43,7 +43,10 @@ export default class ChannelDB implements IChannelDB {
         try {
             for (const channel of channels) {
                 if (typeof channel.channel === 'undefined') {
-                    return;
+                    // 物理チャンネル情報が無いサービスは登録できないが、
+                    // return してしまうと以降の放送局がすべて未登録になるため skip する
+                    this.log.system.warn(`channel info is not found: ${channel.id} ${channel.name}`);
+                    continue;
                 }
 
                 const name = StrUtil.toDBStr(channel.name);
@@ -240,6 +243,26 @@ export default class ChannelDB implements IChannelDB {
         const result = await this.promieRetry.run(() => {
             return repository.findOne({
                 where: [{ id: channelId }],
+            });
+        });
+
+        return typeof result === 'undefined' ? null : result;
+    }
+
+    /**
+     * network id と service id を指定して検索する
+     * TS 解析で得た放送の識別子から放送局を特定するのに使う
+     * @param networkId: number
+     * @param serviceId: number
+     * @return Promise<Channel | null>
+     */
+    public async findNetworkIdAndServiceId(networkId: number, serviceId: number): Promise<Channel | null> {
+        const connection = await this.op.getConnection();
+
+        const repository = connection.getRepository(Channel);
+        const result = await this.promieRetry.run(() => {
+            return repository.findOne({
+                where: [{ networkId: networkId, serviceId: serviceId }],
             });
         });
 

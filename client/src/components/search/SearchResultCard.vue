@@ -1,14 +1,14 @@
 <template>
-    <v-card class="my-2" :class="program.display.reserveType" v-on:click="openDetail">
+    <v-card class="my-2" :class="[program.display.reserveType, { 'is-dark': isDark }]" v-on:click="openDetail">
         <v-list-item three-line>
-            <v-list-item-content>
-                <div class="subtitle-1 font-weight-black">{{ program.display.name }}</div>
-                <div class="subtitle-2 font-weight-light">{{ program.display.channelName }}</div>
-                <div class="caption font-weight-light mb-2">
+            <div class="v-list-item-content">
+                <div class="text-subtitle-1 font-weight-black">{{ program.display.name }}</div>
+                <div class="text-subtitle-2 font-weight-light">{{ program.display.channelName }}</div>
+                <div class="text-caption font-weight-light mb-2">
                     {{ program.display.day }}({{ program.display.dow }}) {{ program.display.startTime }} ~ {{ program.display.endTime }} ({{ program.display.duration }}分)
                 </div>
-                <div class="body-2 grey--text text--darken-2">{{ program.display.description }}</div>
-            </v-list-item-content>
+                <div class="text-body-2 text-grey-darken-2">{{ program.display.description }}</div>
+            </div>
         </v-list-item>
     </v-card>
 </template>
@@ -17,11 +17,16 @@
 import container from '@/model/ModelContainer';
 import IGuideProgramDialogState from '@/model/state/guide/IGuideProgramDialogState';
 import { SearchResultItem } from '@/model/state/search/ISearchState';
-import { Component, Prop, Vue } from 'vue-property-decorator';
+import { Component, Prop, Vue, toNative } from 'vue-facing-decorator';
 import * as apid from '../../../../api';
 
 @Component({})
-export default class SearchResultCard extends Vue {
+class SearchResultCard extends Vue {
+    // 番組表 (Guide.vue) と同じ衝突・スキップ色をダークモードでも使うための判定
+    get isDark(): boolean {
+        return this.$vuetify.theme.global.current.dark;
+    }
+
     @Prop({ required: true })
     public program!: SearchResultItem;
 
@@ -35,6 +40,8 @@ export default class SearchResultCard extends Vue {
         });
     }
 }
+
+export default toNative(SearchResultCard);
 </script>
 
 <style lang="sass" scoped>
@@ -51,4 +58,13 @@ export default class SearchResultCard extends Vue {
     text-decoration: line-through
     background-color: #aaa
     color: black
+
+// 番組表 (Guide.vue) と同じダークモード配色
+&.is-dark
+    &.conflict
+        background-color: #f6c90e
+    &.skip
+        background-color: #717171
+    &.overlap
+        background-color: #717171
 </style>

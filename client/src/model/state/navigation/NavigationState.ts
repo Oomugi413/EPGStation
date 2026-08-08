@@ -1,5 +1,8 @@
 import { inject, injectable } from 'inversify';
-import { Route } from 'vue-router';
+import type { RouteLocationNormalized as Route } from 'vue-router';
+import { isFeatureEnabled } from '../../../util/FeatureFlags';
+import * as apid from '../../../../../api';
+import IChannelModel from '../../channels/IChannelModel';
 import IServerConfigModel from '../../serverConfig/IServerConfigModel';
 import { ISettingStorageModel } from '../../storage/setting/ISettingStorageModel';
 import INavigationState, { NavigationItem, NavigationType } from './INavigationState';
@@ -14,10 +17,58 @@ export default class NavigationState implements INavigationState {
 
     private serverConfig: IServerConfigModel;
     private setting: ISettingStorageModel;
+    private channelModel: IChannelModel;
 
-    constructor(@inject('IServerConfigModel') serverConfig: IServerConfigModel, @inject('ISettingStorageModel') setting: ISettingStorageModel) {
+    constructor(
+        @inject('IServerConfigModel') serverConfig: IServerConfigModel,
+        @inject('ISettingStorageModel') setting: ISettingStorageModel,
+        @inject('IChannelModel') channelModel: IChannelModel,
+    ) {
         this.serverConfig = serverConfig;
         this.setting = setting;
+        this.channelModel = channelModel;
+    }
+
+    /**
+     * 地上波系 (GR / NWxx) の放送波種別か
+     * @param type: string
+     * @return boolean
+     */
+    private static isRegionalType(type: string): boolean {
+        return type === 'GR' || /^NW\d+$/.test(type) === true;
+    }
+
+    /**
+     * 取得済みの放送局情報からグループ (地域 or 系列) の一覧を作成する
+     * 判定不能な放送局 (CATV 等 / BIT 未受信) は末尾にまとめられる
+     * @param regionalTypes: string[] 対象の放送波種別
+     * @param isAffiliationMode: boolean 系列別にまとめるか
+     * @return apid.BroadcastRegionItem[]
+     */
+    private getChannelGroups(regionalTypes: string[], isAffiliationMode: boolean): apid.BroadcastRegionItem[] {
+        const isHalfWidth = this.setting.getSavedValue().isHalfWidthDisplayed;
+        const groups: apid.BroadcastRegionItem[] = [];
+        const addedIds: { [groupId: string]: boolean } = {};
+
+        for (const channel of this.channelModel.getChannels(isHalfWidth)) {
+            if (regionalTypes.indexOf(channel.channelType) === -1) {
+                continue;
+            }
+
+            const group = isAffiliationMode ? channel.affiliation : channel.region;
+            if (typeof group === 'undefined') {
+                continue;
+            }
+
+            if (addedIds[group.id] === true) {
+                continue;
+            }
+            addedIds[group.id] = true;
+            groups.push({ id: group.id, name: group.name, order: group.order });
+        }
+
+        // 表示順に並べる (判定不能なものは order が大きいので必ず末尾になる)
+        return groups.sort((a, b) => a.order - b.order);
     }
 
     /**
@@ -181,7 +232,40 @@ export default class NavigationState implements INavigationState {
                 types.push('NW40');
             }
 
-            for (const type of types) {
+            // 地上波系は地域別 (設定によっては系列別)、BS / CS / SKY は従来通り放送波種別で表示する
+            const regionalTypes = types.filter(type => NavigationState.isRegionalType(type) === true);
+            const otherTypes = types.filter(type => NavigationState.isRegionalType(type) === false);
+            const isAffiliationMode = (this.setting.getSavedValue().channelGroupingType ?? 'region') === 'affiliation';
+            const groups = regionalTypes.length === 0 ? [] : this.getChannelGroups(regionalTypes, isAffiliationMode);
+
+            if (groups.length === 0) {
+                // 放送局情報が未取得などでグループを判定できない場合は放送波種別で表示する
+                for (const type of regionalTypes) {
+                    newItems.push({
+                        icon: 'mdi-television-guide',
+                        title: `番組表${type}`,
+                        herf: {
+                            path: '/guide',
+                            query: {
+                                type: type,
+                            },
+                        },
+                    });
+                }
+            } else {
+                for (const group of groups) {
+                    newItems.push({
+                        icon: 'mdi-television-guide',
+                        title: `番組表${group.name}`,
+                        herf: {
+                            path: '/guide',
+                            query: isAffiliationMode ? { affiliation: group.id } : { region: group.id },
+                        },
+                    });
+                }
+            }
+
+            for (const type of otherTypes) {
                 newItems.push({
                     icon: 'mdi-television-guide',
                     title: `番組表${type}`,
@@ -203,6 +287,14 @@ export default class NavigationState implements INavigationState {
             });
         }
 
+        // 系列一覧 (選ぶと系列別の番組表へ遷移する)
+        newItems.push({
+            icon: 'mdi-television-classic',
+            title: '系列局',
+            herf: {
+                path: '/affiliations',
+            },
+        });
         newItems.push({
             icon: 'mdi-radiobox-marked',
             title: '録画中',
@@ -217,6 +309,14 @@ export default class NavigationState implements INavigationState {
                 path: '/recorded',
             },
         });
+        // 視聴履歴機能 (featureFlags.watchHistory) が有効な場合のみ表示する
+        if (isFeatureEnabled(config, 'watchHistory') === true) {
+            newItems.push({ icon: 'mdi-history', title: '視聴履歴', herf: { path: '/watch-history' } });
+        }
+        // シリーズ機能は段階導入の機能フラグ (featureFlags.seriesLibrary) が有効な場合のみナビゲーションに表示する
+        if (isFeatureEnabled(config, 'seriesLibrary') === true) {
+            newItems.push({ icon: 'mdi-folder-play', title: 'シリーズ', herf: { path: '/series' } });
+        }
         newItems.push({
             icon: 'mdi-sync',
             title: 'エンコード',
@@ -276,7 +376,14 @@ export default class NavigationState implements INavigationState {
             },
         });
         newItems.push({
-            icon: 'settings',
+            icon: 'mdi-text-box-search-outline',
+            title: 'ログ',
+            herf: {
+                path: '/logs',
+            },
+        });
+        newItems.push({
+            icon: 'mdi-cog',
             title: '設定',
             herf: {
                 path: '/settings',
@@ -294,18 +401,22 @@ export default class NavigationState implements INavigationState {
      */
     public updateNavigationPosition(currentRoute: Route): void {
         this.navigationPosition = this.items.findIndex(item => {
-            if (item.herf === null || item.herf.path !== currentRoute.path) {
+            if (item.herf === null) {
                 return false;
             }
 
-            if (typeof item.herf.query === 'undefined') {
+            const path = typeof item.herf === 'string' ? item.herf : 'path' in item.herf ? item.herf.path : undefined;
+            if (path !== currentRoute.path) {
+                return false;
+            }
+
+            const query = typeof item.herf === 'string' || !('query' in item.herf) ? undefined : item.herf.query;
+            if (typeof query === 'undefined') {
                 return true;
-            } else if (typeof currentRoute.query === 'undefined') {
-                return false;
             }
 
-            for (const key in item.herf.query) {
-                if (item.herf.query[key] !== currentRoute.query[key]) {
+            for (const key in query) {
+                if (query[key] !== currentRoute.query[key]) {
                     return false;
                 }
             }

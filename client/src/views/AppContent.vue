@@ -2,6 +2,8 @@
     <v-app class="app-content-root">
         <div v-if="isDisconnected === true" class="disconnected"></div>
         <Navigation></Navigation>
+        <ServerStatusToast></ServerStatusToast>
+        <UpdateNotification></UpdateNotification>
         <router-view></router-view>
         <Snackbar></Snackbar>
     </v-app>
@@ -9,12 +11,15 @@
 
 <script lang="ts">
 import Navigation from '@/components/navigation/Navigation.vue';
+import ServerStatusToast from '@/components/serverStatus/ServerStatusToast.vue';
+import UpdateNotification from '@/components/update/UpdateNotification.vue';
 import Snackbar from '@/components/snackbar/Snackbar.vue';
 import container from '@/model/ModelContainer';
 import IScrollPositionState from '@/model/state/IScrollPositionState';
+import IServerStatusState from '@/model/state/serverStatus/IServerStatusState';
 import ISnackbarState from '@/model/state/snackbar/ISnackbarState';
 import { Container } from 'inversify';
-import { Component, Vue, Watch } from 'vue-property-decorator';
+import { Component, Vue, Watch, toNative } from 'vue-facing-decorator';
 import ISocketIOModel from '../model/socketio/ISocketIOModel';
 import IColorThemeState from '@/model/state/IColorThemeState';
 
@@ -22,19 +27,22 @@ import IColorThemeState from '@/model/state/IColorThemeState';
     components: {
         Navigation,
         Snackbar,
+        ServerStatusToast,
+        UpdateNotification,
     },
 })
-export default class AppContent extends Vue {
+class AppContent extends Vue {
     public isDisconnected: boolean = false;
 
     private socketIoModel: ISocketIOModel = container.get<ISocketIOModel>('ISocketIOModel');
     private scrollState: IScrollPositionState = container.get<IScrollPositionState>('IScrollPositionState');
     private snackbarState: ISnackbarState = container.get<ISnackbarState>('ISnackbarState');
     private colorThemeState: IColorThemeState = container.get<IColorThemeState>('IColorThemeState');
+    private serverStatusState: IServerStatusState = container.get<IServerStatusState>('IServerStatusState');
 
     public async created(): Promise<void> {
         // theme 設定を反映
-        this.$vuetify.theme.dark = this.colorThemeState.isDarkTheme();
+        this.$vuetify.theme.change((this.colorThemeState.isDarkTheme()) ? 'dark' : 'light');
 
         // socket.io 設定
         try {
@@ -47,6 +55,10 @@ export default class AppContent extends Vue {
                 timeout: 5000,
             });
         }
+
+        // mirakurun 接続状態確認
+        this.serverStatusState.fetch();
+        this.serverStatusState.startPolling();
     }
 
     /**
@@ -107,7 +119,9 @@ export default class AppContent extends Vue {
         });
     }
 
-    public destroyed(): void {
+    public unmounted(): void {
+        this.serverStatusState.stopPolling();
+
         const io = this.socketIoModel.getIO();
         if (io === null) {
             return;
@@ -133,6 +147,8 @@ export default class AppContent extends Vue {
         this.scrollState.updateHistoryPosition();
     }
 }
+
+export default toNative(AppContent);
 </script>
 
 <style lang="sass" scoped>

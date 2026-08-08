@@ -35,10 +35,13 @@ export const get: Operation = async (req, res) => {
         if (typeof req.query.hasOriginalFile !== 'undefined') {
             option.hasOriginalFile = req.query.hasOriginalFile as any;
         }
+        if (typeof req.query.tagId !== 'undefined') {
+            option.tagId = parseInt(req.query.tagId as any, 10);
+        }
 
         api.responseJSON(res, 200, await recordedApiModel.gets(option));
-    } catch (err: any) {
-        api.responseServerError(res, err.message);
+    } catch (err: unknown) {
+        api.responseServerError(res, api.getErrorMessage(err));
     }
 };
 
@@ -74,6 +77,9 @@ get.apiDoc = {
         {
             $ref: '#/components/parameters/QueryHasOriginalFile',
         },
+        {
+            $ref: '#/components/parameters/QueryRecordedTagId',
+        },
     ],
     responses: {
         200: {
@@ -106,8 +112,8 @@ export const post: Operation = async (req, res) => {
         api.responseJSON(res, 201, {
             recordedId: await recordedApiModel.createNewRecorded(req.body),
         });
-    } catch (err: any) {
-        api.responseServerError(res, err.message);
+    } catch (err: unknown) {
+        api.responseServerError(res, api.getErrorMessage(err));
     }
 };
 

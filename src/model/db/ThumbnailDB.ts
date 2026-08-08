@@ -31,7 +31,7 @@ export default class ThumbnailDB implements IThumbnailDB {
         let hasError = false;
         try {
             // 削除
-            await queryRunner.manager.delete(Thumbnail, {});
+            await queryRunner.manager.createQueryBuilder().delete().from(Thumbnail).execute();
 
             // 挿入処理
             for (const item of items) {
@@ -114,6 +114,16 @@ export default class ThumbnailDB implements IThumbnailDB {
         });
 
         return typeof result === 'undefined' ? null : result;
+    }
+
+    /**
+     * 録画 ID からサムネイルを 1 件引く (シリーズのアイキャッチ代替に使う)
+     * @param recordedId: apid.RecordedId
+     * @return Promise<Thumbnail | null>
+     */
+    public async findByRecordedId(recordedId: apid.RecordedId): Promise<Thumbnail | null> {
+        const connection = await this.op.getConnection();
+        return await connection.getRepository(Thumbnail).findOne({ where: { recordedId }, order: { id: 'ASC' } });
     }
 
     /**

@@ -1,5 +1,4 @@
 import { ChildProcess, spawn } from 'child_process';
-import * as events from 'events';
 import { inject, injectable } from 'inversify';
 import ProcessUtil from '../../../util/ProcessUtil';
 import IConfiguration from '../../IConfiguration';
@@ -9,6 +8,8 @@ import IEncodeProcessManageModel, { CreateProcessOption } from './IEncodeProcess
 
 interface ChildProcessInfo {
     child: ChildProcess;
+    // 現在はプリエンプション (kill による枠の奪い合い) を行わないため
+    // 比較には使用されない。option.priority をそのまま保持しているのみ。
     priority: number;
     processId: number;
 }
@@ -18,7 +19,6 @@ class EncodeProcessManageModel implements IEncodeProcessManageModel {
     private log: ILogger;
     private maxEncode: number;
     private childs: ChildProcessInfo[] = [];
-    private listener: events.EventEmitter = new events.EventEmitter();
 
     constructor(@inject('ILoggerModel') logeer: ILoggerModel, @inject('IConfiguration') configure: IConfiguration) {
         this.log = logeer.getLogger();
@@ -26,32 +26,30 @@ class EncodeProcessManageModel implements IEncodeProcessManageModel {
     }
 
     /**
+     * 同時起動数の上限を設定する。
+     * 通常エンコードと視聴用ストリームは別インスタンスでこの値を持つ。
+     * @param maxProcessNum: number 同時起動数の上限
+     */
+    public setMaxProcessNum(maxProcessNum: number): void {
+        this.maxEncode = maxProcessNum;
+    }
+
+    /**
      * エンコードプロセスを生成する
-     * プロセスが上限に達しているとき priority が高いプロセスが生成されようとすると、それより低いプロセスが殺される
+     * プロセス数が上限に達しているときは、他のプロセスを kill して枠を空けることはせず、
+     * 常に reject する (プリエンプションは行わない)。
+     * これは配信用エンコードと録画エンコードが互いのプロセスを kill し合い、
+     * 視聴中の配信や実行中のエンコード成果 (出力ファイル) を破壊してしまう問題を避けるための方針である。
+     * 呼び出し側 (EncodeManageModel) は 'EncodeProcessManageModelCreateError' を
+     * 枠不足エラーとして識別し、待ちキューに戻して再試行する。
      * @param option: CreateProcessOption
      * @return Promise<ChildProcess>
      */
     public create(option: CreateProcessOption): Promise<ChildProcess> {
-        return new Promise<ChildProcess>(async (resolve, reject) => {
+        return new Promise<ChildProcess>((resolve, reject) => {
             if (this.childs.length >= this.maxEncode) {
-                // プロセス数が上限に達しているとき
-                // kill 可能な child を探す
-                for (let i = 0; i < this.childs.length; i++) {
-                    // priority が低いプロセスが見つかった
-                    if (option.priority > this.childs[i].priority) {
-                        // kill & create process
-                        try {
-                            const child = await this.killAndCreateProcess(this.childs[i].processId, option);
-                            resolve(child);
-                        } catch (err: any) {
-                            reject(err);
-                        }
-
-                        return;
-                    }
-                }
-
-                // 殺せるプロセスが無くプロセスの生成ができなかった
+                // プロセス数が上限に達しており、kill によるプリエンプションは行わないため
+                // 枠が空くまでは生成できない
                 reject(new Error('EncodeProcessManageModelCreateError'));
             } else {
                 // create process
@@ -67,87 +65,6 @@ class EncodeProcessManageModel implements IEncodeProcessManageModel {
                 }
             }
         });
-    }
-
-    /**
-     * 指定された processId のプロセスを殺して、option で指定されたコマンドのプロセスを生成する
-     * @param planToKillProcessId; number
-     * @param option: CreateProcessOption
-     * @return Promise<ChildProcess>
-     */
-    private killAndCreateProcess(planToKillProcessId: number, option: CreateProcessOption): Promise<ChildProcess> {
-        return new Promise<ChildProcess>(async (resolve, reject) => {
-            let timeoutId: NodeJS.Timer | null = null;
-
-            /**
-             * プロセスを生成
-             *  プロセスが殺されたら呼ばされる
-             */
-            const createChild = (killedProcessId: number) => {
-                // 殺されたプロセスが planToKillProcessId ではないのでスルー
-                if (killedProcessId !== planToKillProcessId) {
-                    return;
-                }
-
-                // リスナー登録解除
-                this.removeListener(createChild);
-
-                // プロセス生成 & 登録
-                try {
-                    const child = this.buildProcess(option);
-                    this.childs.unshift(child);
-                    resolve(child.child);
-                    if (timeoutId !== null) {
-                        clearInterval(timeoutId); // timeout クリア
-                    }
-                    this.log.encode.info(`kill & create new encode process: ${child.processId}`);
-                } catch (err: any) {
-                    this.log.encode.error('kill & create new encode process failed');
-                    this.log.encode.error(err);
-                    reject(err);
-                }
-            };
-
-            /**
-             * timeout 設定
-             * 時間内にプロセスが殺せなかったらエラー
-             */
-            timeoutId = setTimeout(() => {
-                this.removeListener(createChild);
-                this.log.encode.error(`EncodeProcessManageModel timeout error: ${planToKillProcessId}`);
-                reject(new Error('EncodeProcessManageModelTimeoutError'));
-            }, 3 * 1000);
-
-            // プロセスが死んだら呼び出されるようにリスナーに追加
-            this.addListener(createChild);
-
-            // kill
-            try {
-                await this.killChild(planToKillProcessId);
-            } catch (err: any) {
-                this.log.encode.error(`kill process failed: ${planToKillProcessId}`);
-                this.log.encode.error(err);
-                this.removeListener(createChild);
-                reject(err);
-            }
-        });
-    }
-
-    /**
-     * add listener
-     * プロセスが死んだら呼ばれる
-     * @param callback: (killedProcessId: number) => void
-     */
-    private addListener(callback: (killedProcessId: number) => void): void {
-        this.listener.on(EncodeProcessManageModel.KILL_CHILD_EVENT, callback);
-    }
-
-    /**
-     * remove listener
-     * @param callback: (killedProcessId: number) => void
-     */
-    private removeListener(callback: (killedProcessId: number) => void): void {
-        this.listener.removeListener(EncodeProcessManageModel.KILL_CHILD_EVENT, callback);
     }
 
     /**
@@ -187,30 +104,56 @@ class EncodeProcessManageModel implements IEncodeProcessManageModel {
      * @return ChildProcessInfo
      */
     private buildProcess(option: CreateProcessOption): ChildProcessInfo {
-        let cmds: ProcessUtil.Cmds;
-        try {
-            cmds = ProcessUtil.parseCmdStr(option.cmd);
-        } catch (err: any) {
-            this.log.encode.error(`build process error: ${option.cmd}`);
-            throw err;
+        // パイプライン (例: tsreadex | ffmpeg) を含むコマンドはシェル経由で実行する
+        // (Windows では cmd.exe、その他では /bin/sh が使われる)
+        const useShell = option.cmd.includes('|');
+
+        let cmds: ProcessUtil.Cmds | null = null;
+        if (useShell === false) {
+            try {
+                cmds = ProcessUtil.parseCmdStr(option.cmd);
+            } catch (err: any) {
+                this.log.encode.error(`build process error: ${option.cmd}`);
+                throw err;
+            }
         }
 
         // input, output を置換
-        for (let i = 0; i < cmds.args.length; i++) {
+        let shellCmd = option.cmd;
+        if (useShell === true) {
             if (option.input !== null) {
-                cmds.args[i] = cmds.args[i].replace(/%INPUT%/g, option.input);
+                shellCmd = shellCmd.replace(/%INPUT%/g, option.input);
             }
-
             if (option.output !== null) {
-                cmds.args[i] = cmds.args[i].replace(/%OUTPUT%/g, option.output);
+                shellCmd = shellCmd.replace(/%OUTPUT%/g, option.output);
+            }
+        } else if (cmds !== null) {
+            for (let i = 0; i < cmds.args.length; i++) {
+                if (option.input !== null) {
+                    cmds.args[i] = cmds.args[i].replace(/%INPUT%/g, option.input);
+                }
+
+                if (option.output !== null) {
+                    cmds.args[i] = cmds.args[i].replace(/%OUTPUT%/g, option.output);
+                }
             }
         }
 
         // プロセス生成
-        const child =
-            typeof option.spawnOption === 'undefined'
-                ? spawn(cmds.bin, cmds.args)
-                : spawn(cmds.bin, cmds.args, option.spawnOption);
+        let child: ChildProcess;
+        if (useShell === true) {
+            this.log.encode.info(`spawn with shell: ${shellCmd}`);
+            child =
+                typeof option.spawnOption === 'undefined'
+                    ? spawn(shellCmd, { shell: true })
+                    : spawn(shellCmd, { ...option.spawnOption, shell: true });
+        } else {
+            const parsedCmds = cmds as ProcessUtil.Cmds;
+            child =
+                typeof option.spawnOption === 'undefined'
+                    ? spawn(parsedCmds.bin, parsedCmds.args)
+                    : spawn(parsedCmds.bin, parsedCmds.args, option.spawnOption);
+        }
         const processId = new Date().getTime();
 
         // エラー発生時にプロセスを停止して this.childs から削除する
@@ -218,13 +161,11 @@ class EncodeProcessManageModel implements IEncodeProcessManageModel {
             await this.killChild(processId, true).catch(err => {
                 this.log.encode.error(err);
             });
-            this.eventsNotify(processId);
         });
         child.on('exit', async () => {
             await this.killChild(processId, true).catch(err => {
                 this.log.encode.error(err);
             });
-            this.eventsNotify(processId);
         });
 
         // buffer が埋まらないようにする
@@ -241,7 +182,6 @@ class EncodeProcessManageModel implements IEncodeProcessManageModel {
                 await this.killChild(processId, true).catch(err => {
                     this.log.encode.error(err);
                 });
-                this.eventsNotify(processId);
                 child.removeAllListeners();
             }, 50);
         }
@@ -252,18 +192,6 @@ class EncodeProcessManageModel implements IEncodeProcessManageModel {
             processId: processId,
         };
     }
-
-    /**
-     * エンコードプロセスの死亡を通知する
-     * @param processId: number
-     */
-    private eventsNotify(processId: number): void {
-        this.listener.emit(EncodeProcessManageModel.KILL_CHILD_EVENT, processId);
-    }
-}
-
-namespace EncodeProcessManageModel {
-    export const KILL_CHILD_EVENT = 'killChild';
 }
 
 export default EncodeProcessManageModel;

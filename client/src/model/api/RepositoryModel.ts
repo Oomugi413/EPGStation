@@ -31,6 +31,30 @@ class RepositoryModel implements IRepositoryModel {
             },
             responseType: 'text',
         });
+
+        this.setUnauthorizedHandler(this.repo);
+        this.setUnauthorizedHandler(this.textRepo);
+    }
+
+    /**
+     * セッション切れ (401) を検知したら画面を読み込み直してログイン画面へ戻す。
+     * 個々の画面が 401 を意識しなくて済むよう共通層で処理する
+     */
+    private setUnauthorizedHandler(instance: AxiosInstance): void {
+        instance.interceptors.response.use(
+            response => response,
+            error => {
+                const url: string = error?.config?.url ?? '';
+                // 認証 API 自体の 401 (ログイン失敗) は呼び出し元へ返す。
+                // それ以外はセッション切れ or ログインが必要な操作なのでログイン画面へ誘導する
+                // (匿名利用が許可されている場合、単純な再読み込みでは同じ画面に戻って堂々巡りになる)
+                if (error?.response?.status === 401 && url.startsWith('/auth') === false) {
+                    window.location.replace(`${window.location.pathname}?login=1`);
+                }
+
+                return Promise.reject(error);
+            },
+        );
     }
 
     /**

@@ -26,7 +26,20 @@
     $ npm run build
     ```
 
+    `mirakurun` は GitHub リポジトリを git 参照 (`git+https://...#<タグ>`) で固定しているため、npm の依存元制限
+    (`allow-git`) が許可されていないと `npm run all-install` が失敗します。
+    リポジトリの `.npmrc` で `allow-git=all` を設定済みですが、それでも失敗する場合は
+    環境変数で明示してください
+
+    ```bash
+    $ NPM_CONFIG_ALLOW_GIT=all npm run all-install
+    ```
+
 3. 設定ファイルの作成
+
+    **この手順は省略できます。** 用意されていない場合は初回起動時に
+    テンプレート (`*.template` / `*.sample.yml`) から自動生成されます。
+    先に内容を確認・編集しておきたい場合のみ実行してください。
 
     ```bash
     $ cp config/config.yml.template config/config.yml
@@ -49,16 +62,16 @@
 
 ## EPGStation の起動 / 終了
 
--   手動で起動する場合
+- 手動で起動する場合
 
     ```
     $ npm start
     ```
 
--   自動で起動する場合
+- 自動で起動する場合
 
-    -   [pm2](http://pm2.keymetrics.io/) を利用して自動起動設定が可能です
-    -   初回のみ以下の起動設定が必要です
+    - [pm2](http://pm2.keymetrics.io/) を利用して自動起動設定が可能です
+    - 初回のみ以下の起動設定が必要です
 
     ```
     $ sudo npm install pm2 -g
@@ -67,19 +80,19 @@
     $ pm2 save
     ```
 
--   手動で終了する場合
+- 手動で終了する場合
 
     ```
     $ npm stop
     ```
 
--   自動起動した EPGStation を終了する場合
+- 自動起動した EPGStation を終了する場合
 
     ```
     $ pm2 stop epgstation
     ```
 
--   自動起動登録した EPGStation を削除する場合
+- 自動起動登録した EPGStation を削除する場合
 
     ```
     $ pm2 delete epgstation

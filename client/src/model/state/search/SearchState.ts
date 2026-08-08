@@ -38,7 +38,7 @@ export default class SearchState implements ISearchState {
     public saveOption: SaveOption | null = null;
     public encodeOption: EncodedOption | null = null;
 
-    // vuetify-datetime-picker のリセットがうまくできないため一瞬 false にすることでクリアする
+    // 日時入力を再描画して期間の表示値を確実にクリアする
     public isShowPeriod: boolean = true;
     // ルールオプションのアコーディオンの開閉を行う
     public optionPanel: number[] = [];
@@ -112,7 +112,7 @@ export default class SearchState implements ISearchState {
         // set startTimeItems
         for (let i = 0; i <= 23; i++) {
             this.startTimeItems.push({
-                text: `${i.toString(10)}時`,
+                title: `${i.toString(10)}時`,
                 value: i,
             });
         }
@@ -120,7 +120,7 @@ export default class SearchState implements ISearchState {
         // set rangeTimeItems
         for (let i = 1; i <= 23; i++) {
             this.rangeTimeItems.push({
-                text: `${i.toString(10)}時間`,
+                title: `${i.toString(10)}時間`,
                 value: i,
             });
         }
@@ -961,7 +961,7 @@ export default class SearchState implements ISearchState {
     public getChannelItems(): SelectorItem[] {
         return this.channelModel.getChannels(this.settingModel.getSavedValue().isHalfWidthDisplayed).map(c => {
             return {
-                text: c.name,
+                title: c.name,
                 value: c.id,
             };
         });

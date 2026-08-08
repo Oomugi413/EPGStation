@@ -1,7 +1,7 @@
 <template>
     <v-main>
         <TitleBar
-            :title="typeof $route.query.channelId === 'undefined' ? guideState.getTitle($route.query.type) : guideState.getSingleStationTitle()"
+            :title="typeof $route.query.channelId === 'undefined' ? guideState.getTitle(guideType) : guideState.getSingleStationTitle()"
             :needsTitleClickEvent="true"
             v-on:click="onTitle"
         >
@@ -34,7 +34,7 @@
         </div>
         <ProgramDialog></ProgramDialog>
         <OnAirSelectStream :needsGotoGuideButton="true"></OnAirSelectStream>
-        <GuideDaySelectDialog :isOpen.sync="isOpenDaySelectDialog"></GuideDaySelectDialog>
+        <GuideDaySelectDialog v-model:isOpen="isOpenDaySelectDialog"></GuideDaySelectDialog>
     </v-main>
 </template>
 
@@ -60,10 +60,9 @@ import { ISettingStorageModel, ISettingValue } from '@/model/storage/setting/ISe
 import UaUtil from '@/util/UaUtil';
 import Util from '@/util/Util';
 import { debounce, throttle } from 'lodash';
-import { Component, Vue, Watch } from 'vue-property-decorator';
-import { Route } from 'vue-router';
+import { Component, Vue, Watch, toNative } from 'vue-facing-decorator';
+import type { RouteLocationNormalized as Route } from 'vue-router';
 
-Component.registerHooks(['beforeRouteUpdate', 'beforeRouteLeave']);
 
 @Component({
     components: {
@@ -80,9 +79,18 @@ Component.registerHooks(['beforeRouteUpdate', 'beforeRouteLeave']);
         GuideDaySelectDialog,
     },
 })
-export default class Guide extends Vue {
+class Guide extends Vue {
+    // EIT[p/f] 更新による番組表の取り直しの最小間隔 (10 秒周期の通知で再取得を繰り返さないため)
+    private static readonly ON_AIR_REFRESH_INTERVAL = 30 * 1000;
+    // 無限スクロールで次の時間帯を読み込み始める、末尾からの距離 (px)
+    private static readonly LOAD_MORE_THRESHOLD = 600;
+
     public isLoading: boolean = true;
     public guideState: IGuideState = container.get<IGuideState>('IGuideState');
+
+    get guideType(): string | undefined {
+        return Util.getRouteString(this.$route.query.type);
+    }
     public isOpenDaySelectDialog: boolean = false;
 
     private scrollState: IScrollPositionState = container.get<IScrollPositionState>('IScrollPositionState');
@@ -93,6 +101,13 @@ export default class Guide extends Vue {
     private socketIoModel: ISocketIOModel = container.get<ISocketIOModel>('ISocketIOModel');
     private onUpdateStatusCallback = ((): void => {
         this.guideState.updateReserves();
+    }).bind(this);
+
+    // EIT[p/f] の更新通知。現在時刻を含む表示のときだけ番組表を取り直す。
+    // 10 秒周期で流れてくる可能性があるため間引き、スクロール位置は維持する
+    private lastOnAirRefreshAt = 0;
+    private onUpdateOnAirProgramCallback = ((): void => {
+        void this.refreshByOnAirUpdate();
     }).bind(this);
 
     private programBaseWidth: number = 140;
@@ -110,10 +125,11 @@ export default class Guide extends Vue {
     }, 100);
 
     private isiOS: boolean = false;
+    private isLoadingMore: boolean = false;
 
     get darkClassList(): any {
         return {
-            'is-dark': this.settingValue?.isForceDisableDarkThemeForGuide !== true && this.$vuetify.theme.dark === true,
+            'is-dark': this.settingValue?.isForceDisableDarkThemeForGuide !== true && this.$vuetify.theme.global.current.dark === true,
         };
     }
 
@@ -140,6 +156,7 @@ export default class Guide extends Vue {
 
         // socket.io イベント
         this.socketIoModel.onUpdateState(this.onUpdateStatusCallback);
+        this.socketIoModel.onUpdateOnAirProgram(this.onUpdateOnAirProgramCallback);
 
         if (UaUtil.isiOS() === true) {
             // html の class に guide を追加
@@ -148,12 +165,13 @@ export default class Guide extends Vue {
         }
     }
 
-    public beforeDestroy(): void {
+    public beforeUnmount(): void {
         // リサイズイベント追加
         window.removeEventListener('resize', this.windowResizeCallback, false);
 
         // socket.io イベント
         this.socketIoModel.offUpdateState(this.onUpdateStatusCallback);
+        this.socketIoModel.offUpdateOnAirProgram(this.onUpdateOnAirProgramCallback);
 
         if (UaUtil.isiOS() === true) {
             // html の class から guide を削除
@@ -206,12 +224,17 @@ export default class Guide extends Vue {
         ) {
             this.scrollCallback();
         }
+
+        // 末尾付近まで来たら次の時間帯を読み込む
+        if (element.scrollTop + element.clientHeight >= element.scrollHeight - Guide.LOAD_MORE_THRESHOLD) {
+            void this.loadMore();
+        }
     }
 
     /**
      * ページ更新時に呼ばれる
      */
-    public beforeRouteUpdate(to: Route, from: Route, next: () => void): void {
+    public handleBeforeRouteUpdate(to: Route, from: Route, next: () => void): void {
         this.saveScrollPosition();
         next();
     }
@@ -219,7 +242,7 @@ export default class Guide extends Vue {
     /**
      * ページ離脱時に呼ばれる
      */
-    public beforeRouteLeave(to: Route, from: Route, next: () => void): void {
+    public handleBeforeRouteLeave(to: Route, from: Route, next: () => void): void {
         this.saveScrollPosition();
         next();
     }
@@ -234,10 +257,40 @@ export default class Guide extends Vue {
 
         try {
             this.scrollState.saveScrollData({
-                x: (this.$refs.programs as GuideScroller).$el.scrollLeft,
-                y: (this.$refs.programs as GuideScroller).$el.scrollTop,
+                x: (this.$refs.programs as InstanceType<typeof GuideScroller>).$el.scrollLeft,
+                y: (this.$refs.programs as InstanceType<typeof GuideScroller>).$el.scrollTop,
             });
         } catch (err) {
+            console.error(err);
+        }
+    }
+
+    /**
+     * EIT[p/f] の更新を番組表へ反映する。
+     * 過去・未来の時間帯を表示しているときは無関係なので何もしない
+     */
+    private async refreshByOnAirUpdate(): Promise<void> {
+        // 時刻指定で過去/未来を見ている場合は現在放送中の変更と無関係
+        if (typeof this.$route.query.time === 'string') return;
+        const now = new Date().getTime();
+        if (now - this.lastOnAirRefreshAt < Guide.ON_AIR_REFRESH_INTERVAL) return;
+        this.lastOnAirRefreshAt = now;
+
+        // 取り直しでスクロール位置が飛ばないように退避しておく
+        const scroller = this.$refs.programs as InstanceType<typeof GuideScroller> | undefined;
+        const left = scroller?.$el.scrollLeft ?? 0;
+        const top = scroller?.$el.scrollTop ?? 0;
+        try {
+            await this.guideState.fetchGuide(this.createFetchGuideOption());
+            this.guideState.createProgramDoms(typeof this.$route.query.channelId !== 'undefined');
+            this.$nextTick(() => {
+                const target = this.$refs.programs as InstanceType<typeof GuideScroller> | undefined;
+                if (typeof target === 'undefined') return;
+                target.$el.scrollLeft = left;
+                target.$el.scrollTop = top;
+            });
+        } catch (err) {
+            // 番組表の自動更新に失敗しても、表示中の内容はそのまま使えるので黙って諦める
             console.error(err);
         }
     }
@@ -278,49 +331,25 @@ export default class Guide extends Vue {
                     if (this.scrollState.isNeedRestoreHistory === true) {
                         const position = this.scrollState.getScrollData<{ x: number; y: number }>();
                         if (position !== null) {
-                            (this.$refs.programs as GuideScroller).$el.scrollLeft = position.x;
-                            (this.$refs.programs as GuideScroller).$el.scrollTop = position.y;
+                            (this.$refs.programs as InstanceType<typeof GuideScroller>).$el.scrollLeft = position.x;
+                            (this.$refs.programs as InstanceType<typeof GuideScroller>).$el.scrollTop = position.y;
                         }
                         this.scrollState.isNeedRestoreHistory = false;
                     } else {
                         // スクロール位置初期化
-                        (this.$refs.programs as GuideScroller).$el.scrollLeft = 0;
-                        (this.$refs.programs as GuideScroller).$el.scrollTop = 0;
+                        (this.$refs.programs as InstanceType<typeof GuideScroller>).$el.scrollLeft = 0;
+                        (this.$refs.programs as InstanceType<typeof GuideScroller>).$el.scrollTop = 0;
                         if (typeof this.$refs.channels !== 'undefined' && typeof this.$refs.times !== 'undefined') {
                             (this.$refs.channels as HTMLElement).scrollLeft = 0;
                             (this.$refs.times as HTMLElement).scrollTop = 0;
                         }
                     }
 
-                    // 時刻線要素を退避
-                    const timeline = (this.$refs.content as HTMLElement).getElementsByClassName('time-line')[0];
-
-                    // 追加する前に前回の子要素を削除
-                    while ((this.$refs.content as HTMLElement).firstChild) {
-                        const firstChild = (this.$refs.content as HTMLElement).firstChild;
-                        if (firstChild !== null) {
-                            (this.$refs.content as HTMLElement).removeChild(firstChild);
-                        }
-                    }
-
-                    // 時刻線要素を元に戻す
-                    (this.$refs.content as HTMLElement).appendChild(timeline);
-
-                    await Util.sleep(100);
-                    const programDoms = this.guideState.getProgramDoms();
-                    const domsLength = programDoms.length;
-                    for (let i = 0; i < domsLength; i++) {
-                        (this.$refs.content as HTMLElement).appendChild(programDoms[i].element);
-                        if (i % 500 === 0) {
-                            await Util.sleep(1);
-                        }
-                    }
-
-                    this.guideState.updateVisible();
+                    await this.renderProgramDoms(100);
 
                     // 番組表を矢印キーで操作できるようにフォーカスする
                     if (UaUtil.isAndroid() === false && typeof this.$refs.programs !== 'undefined') {
-                        const el = (this.$refs.programs as GuideScroller).$el as HTMLElement;
+                        const el = (this.$refs.programs as InstanceType<typeof GuideScroller>).$el as HTMLElement;
                         el.tabIndex = -1; //tabIndex を設定することで forcus() が効くようにする
                         el.focus();
                         el.style.outline = 'none'; // tabIndex 設定時に forcus されると outline が表示されるので削除
@@ -332,6 +361,83 @@ export default class Guide extends Vue {
                 this.isLoading = false;
             });
         });
+    }
+
+    /**
+     * 生成済みの番組 DOM を描画領域へ流し込む
+     * @param waitTime: number 描画開始前の待ち時間 (ms)
+     */
+    private async renderProgramDoms(waitTime: number = 0): Promise<void> {
+        if (typeof this.$refs.content === 'undefined') {
+            return;
+        }
+
+        const content = this.$refs.content as HTMLElement;
+
+        // 時刻線要素を退避
+        const timeline = content.getElementsByClassName('time-line')[0];
+
+        // 追加する前に前回の子要素を削除
+        while (content.firstChild) {
+            const firstChild = content.firstChild;
+            if (firstChild !== null) {
+                content.removeChild(firstChild);
+            }
+        }
+
+        // 時刻線要素を元に戻す
+        if (typeof timeline !== 'undefined') {
+            content.appendChild(timeline);
+        }
+
+        if (waitTime > 0) {
+            await Util.sleep(waitTime);
+        }
+
+        const programDoms = this.guideState.getProgramDoms();
+        const domsLength = programDoms.length;
+        for (let i = 0; i < domsLength; i++) {
+            content.appendChild(programDoms[i].element);
+            if (i % 500 === 0) {
+                await Util.sleep(1);
+            }
+        }
+
+        this.guideState.updateVisible();
+    }
+
+    /**
+     * 番組表の末尾までスクロールしたら次の時間帯を読み込む (無限スクロール)
+     */
+    private async loadMore(): Promise<void> {
+        // 単局表示 (週間番組表) は 8 日分固定なので追加読み込みしない
+        if (this.isLoadingMore === true || typeof this.$route.query.channelId !== 'undefined' || typeof this.$refs.programs === 'undefined') {
+            return;
+        }
+
+        this.isLoadingMore = true;
+        const scroller = (this.$refs.programs as InstanceType<typeof GuideScroller>).$el as HTMLElement;
+        const left = scroller.scrollLeft;
+        const top = scroller.scrollTop;
+
+        try {
+            const isAppended = await this.guideState.appendGuide(this.createFetchGuideOption());
+            if (isAppended === true) {
+                this.setDisplayRange();
+                this.guideState.createProgramDoms(false);
+                await this.$nextTick();
+                await this.renderProgramDoms();
+                scroller.scrollLeft = left;
+                scroller.scrollTop = top;
+                this.setDisplayRange();
+                this.guideState.updateVisible();
+            }
+        } catch (err) {
+            // 追加読み込みの失敗は表示中の内容に影響しないため通知しない
+            console.error(err);
+        }
+
+        this.isLoadingMore = false;
     }
 
     /**
@@ -412,6 +518,14 @@ export default class Guide extends Vue {
             result.type = this.$route.query.type as any;
         }
 
+        if (typeof this.$route.query.region !== 'undefined') {
+            result.region = Util.getRouteString(this.$route.query.region);
+        }
+
+        if (typeof this.$route.query.affiliation !== 'undefined') {
+            result.affiliation = Util.getRouteString(this.$route.query.affiliation);
+        }
+
         if (typeof this.$route.query.time !== 'undefined') {
             result.time = this.$route.query.time as any;
         }
@@ -427,13 +541,22 @@ export default class Guide extends Vue {
         this.guideState.setDisplayRange({
             baseWidth: this.programBaseWidth,
             baseHeight: this.programBaseHeight,
-            maxWidth: ((this.$refs.programs as GuideScroller).$el as HTMLElement).offsetWidth,
-            maxHeight: ((this.$refs.programs as GuideScroller).$el as HTMLElement).offsetHeight,
-            offsetWidth: (this.$refs.programs as GuideScroller).$el.scrollLeft,
-            offsetHeight: (this.$refs.programs as GuideScroller).$el.scrollTop,
+            maxWidth: ((this.$refs.programs as InstanceType<typeof GuideScroller>).$el as HTMLElement).offsetWidth,
+            maxHeight: ((this.$refs.programs as InstanceType<typeof GuideScroller>).$el as HTMLElement).offsetHeight,
+            offsetWidth: (this.$refs.programs as InstanceType<typeof GuideScroller>).$el.scrollLeft,
+            offsetHeight: (this.$refs.programs as InstanceType<typeof GuideScroller>).$el.scrollTop,
         });
     }
 }
+
+export default Object.assign(toNative(Guide), {
+    beforeRouteUpdate(this: Guide, to: Route, from: Route, next: () => void): void {
+            this.handleBeforeRouteUpdate(to, from, next);
+        },
+    beforeRouteLeave(this: Guide, to: Route, from: Route, next: () => void): void {
+            this.handleBeforeRouteLeave(to, from, next);
+        },
+});
 </script>
 
 <style lang="sass" scoped>
@@ -453,7 +576,10 @@ export default class Guide extends Vue {
         width: 100%
 
         .program-wrap
-            overflow: hidden
+            // Vuetify 4 のユーティリティ (.overflow-auto) は @layer 内で定義されており、
+            // レイヤ外のこのスコープ付き CSS に必ず負ける。
+            // overflow: hidden を書くと番組表がスクロールできなくなるため auto を明示する
+            overflow: auto
             width: calc(100% - var(--timescale-width))
 </style>
 
@@ -532,6 +658,11 @@ $window-width: 600px
                 font-weight: bold
             > div
                 pointer-events: none
+            &.following
+                .name::before
+                    content: "追 "
+                    color: #ff6f00
+                    font-weight: bold
             &.reserve
                 border: 4px solid red !important
             &.hide

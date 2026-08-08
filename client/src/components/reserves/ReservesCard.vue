@@ -1,11 +1,11 @@
 <template>
-    <div v-bind:class="{ 'needs-decoration': !!needsDecoration }">
-        <v-card v-for="reserve in reserves" v-bind:key="reserve.id" v-bind:class="getClass(reserve)" class="reserve-card mx-auto" :flat="!!flat" style="cursor: pointer">
+    <div v-bind:class="{ 'needs-decoration': !!needsDecoration, 'is-dark': isDark }">
+        <v-card v-for="reserve in reserves" v-bind:key="reserve.reserveItem.id" v-bind:class="getClass(reserve)" class="reserve-card mx-auto" :variant="flat ? 'flat' : 'elevated'" style="cursor: pointer">
             <v-list-item class="px-3" three-line>
                 <div style="width: 100%" v-on:click="clickItem(reserve)">
-                    <v-list-item-content>
+                    <div class="v-list-item-content">
                         <div class="d-flex">
-                            <div class="subtitle-1 font-weight-black">
+                            <div class="text-subtitle-1 font-weight-black">
                                 <v-icon v-if="reserve.display.isRule === true" class="reserve-icon">mdi-calendar</v-icon>
                                 <v-icon v-else class="reserve-icon">mdi-timer-outline</v-icon>
                                 <span class="pt-1 pl-1">{{ reserve.display.name }}</span>
@@ -13,32 +13,42 @@
                             <v-spacer></v-spacer>
                             <ReserveMenu v-if="isEditMode === false" :reserveItem="reserve.reserveItem" :disableEdit="disableEdit"></ReserveMenu>
                         </div>
-                        <div class="subtitle-2 font-weight-light">{{ reserve.display.channelName }}</div>
-                        <div class="caption font-weight-light mb-2">
-                            {{ reserve.display.day }}({{ reserve.display.dow }}) {{ reserve.display.startTime }} ~ {{ reserve.display.endTime }} ({{ reserve.display.duration }}分)
+                        <div class="text-subtitle-2 font-weight-light">{{ reserve.display.channelName }}</div>
+                        <div class="text-caption font-weight-light mb-2">
+                            {{ reserve.display.day }}({{ reserve.display.dow }}) {{ reserve.display.startTime }} ~
+                            <span v-bind:class="{ 'text-error font-weight-bold': reserve.reserveItem.isTimeUndefined === true }">{{ reserve.display.endTime }}</span>
+                            ({{ reserve.display.duration }}分)
                         </div>
-                        <div class="body-2 font-weight-light">{{ reserve.display.description }}</div>
-                    </v-list-item-content>
+                        <ReserveScheduleStatus :reserveItem="reserve.reserveItem" class="d-block mb-2"></ReserveScheduleStatus>
+                        <div class="text-body-2 font-weight-light">{{ reserve.display.description }}</div>
+                    </div>
                 </div>
             </v-list-item>
         </v-card>
-        <ReserveDialog :isOpen.sync="isOpenDialog" :reserve="dialogReserve"></ReserveDialog>
+        <ReserveDialog v-model:isOpen="isOpenDialog" :reserve="dialogReserve"></ReserveDialog>
     </div>
 </template>
 
 <script lang="ts">
 import ReserveDialog from '@/components/reserves/ReserveDialog.vue';
 import ReserveMenu from '@/components/reserves/ReserveMenu.vue';
+import ReserveScheduleStatus from '@/components/reserves/ReserveScheduleStatus.vue';
 import { ReserveStateData } from '@/model/state/reserve/IReserveStateUtil';
-import { Component, Prop, Vue } from 'vue-property-decorator';
+import { Component, Prop, Vue, toNative } from 'vue-facing-decorator';
 
 @Component({
     components: {
         ReserveMenu,
         ReserveDialog,
+        ReserveScheduleStatus,
     },
 })
-export default class ReservesCard extends Vue {
+class ReservesCard extends Vue {
+    // 番組表 (Guide.vue) と同じ衝突・スキップ色をダークモードでも使うための判定
+    get isDark(): boolean {
+        return this.$vuetify.theme.global.current.dark;
+    }
+
     @Prop({
         required: true,
     })
@@ -94,6 +104,8 @@ export default class ReservesCard extends Vue {
         this.isOpenDialog = true;
     }
 }
+
+export default toNative(ReservesCard);
 </script>
 
 <style lang="sass" scoped>
@@ -114,6 +126,15 @@ export default class ReservesCard extends Vue {
         text-decoration: line-through
         background-color: #aaa
         color: black
+
+    // 番組表 (Guide.vue) と同じダークモード配色
+    &.is-dark
+        .conflict
+            background-color: #f6c90e
+        .skip
+            background-color: #717171
+        .overlap
+            background-color: #717171
 
 .reserve-icon
     font-size: 20px !important

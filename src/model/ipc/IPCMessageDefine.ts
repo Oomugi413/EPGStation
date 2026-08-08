@@ -6,8 +6,17 @@ export type MessageId = number;
  * 親プロセスから子プロセスへのメッセージ
  */
 export interface ParentMessage {
-    type: 'pushEncode' | 'notifyClient';
+    type: 'pushEncode' | 'notifyClient' | 'notifyOnAirProgram';
     value?: any;
+}
+
+/**
+ * EIT[p/f] 相当の更新通知。視聴画面・番組表を即時更新させるため、
+ * 対象の放送局 id を添えて socket.io で配る
+ */
+export interface NotifyOnAirProgramMessage extends ParentMessage {
+    type: 'notifyOnAirProgram';
+    value: { channelIds: number[] };
 }
 
 /**
@@ -58,6 +67,9 @@ export enum ModelName {
     rule = 'rule',
     thumbnail = 'thumbnail',
     encodeEvent = 'encodeEvent',
+    series = 'series',
+    appSetting = 'appSetting',
+    update = 'update',
 }
 
 /**
@@ -87,8 +99,12 @@ export enum RecordedFunctions {
     createNewRecorded = 'createNewRecorded',
     deleteVideoFile = 'deleteVideoFile',
     changeProtect = 'changeProtect',
+    getCleanupInfo = 'getCleanupInfo',
     videoFileCleanup = 'videoFileCleanup',
     dropLogFileCleanup = 'dropLogFileCleanup',
+    startImportJob = 'startImportJob',
+    getImportJobStatus = 'getImportJobStatus',
+    retryImportJob = 'retryImportJob',
 }
 
 /**
@@ -136,4 +152,37 @@ export enum ThumbnailFunctions {
  */
 export enum OperatorEncodeEventFunctions {
     emitFinishEncode = 'emitFinishEncode',
+}
+
+/**
+ * series (バックフィル) の関数定義
+ */
+export enum SeriesFunctions {
+    startBackfill = 'startBackfill',
+    getBackfillStatus = 'getBackfillStatus',
+    cancelBackfill = 'cancelBackfill',
+    analyze = 'analyze',
+}
+
+/**
+ * システム設定 (app_setting) のホットリロード通知関数定義 (§6.3)。
+ * Service プロセス (Web API) で設定が更新された際、Operator プロセス側の
+ * 対象モジュール (メタデータプロバイダー・通知) だけを再初期化するために使う。
+ * 録画中の処理には一切影響しないよう、単なる「変更があった」という通知に留める
+ */
+export enum AppSettingFunctions {
+    notifyChanged = 'notifyChanged',
+}
+
+/**
+ * バージョン更新の関数定義。
+ * 更新は git 操作・ビルド・プロセス再起動を伴うため、Service (子) ではなく
+ * Operator (親) 側で実行する必要がある
+ */
+export enum UpdateFunctions {
+    getStatus = 'getStatus',
+    check = 'check',
+    run = 'run',
+    getJob = 'getJob',
+    restart = 'restart',
 }

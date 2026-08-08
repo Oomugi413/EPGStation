@@ -1,7 +1,7 @@
 import { inject, injectable } from 'inversify';
 import * as apid from '../../../../../api';
 import IRepositoryModel from '../IRepositoryModel';
-import IRecordedApiModel from './IRecordedApiModel';
+import IRecordedApiModel, { NextUpRequestOption, NextUpResponse } from './IRecordedApiModel';
 
 @injectable()
 export default class RecordedApiModel implements IRecordedApiModel {
@@ -98,10 +98,86 @@ export default class RecordedApiModel implements IRecordedApiModel {
     }
 
     /**
+     * 録画クリーンアップの削除候補情報を取得する (実削除は行わない)
+     * @return Promise<apid.RecordedCleanupInfo>
+     */
+    public async getCleanupInfo(): Promise<apid.RecordedCleanupInfo> {
+        const result = await this.repository.get('/recorded/cleanup/info');
+
+        return result.data;
+    }
+
+    /**
      * 録画のクリーンアップ
+     * @param target: apid.RecordedCleanupTarget 省略時は 'all' (録画実ファイル + ドロップログファイル)
      * @return Promise<void>
      */
-    public async cleanup(): Promise<void> {
-        await this.repository.post('/recorded/cleanup');
+    public async cleanup(target?: apid.RecordedCleanupTarget): Promise<void> {
+        await this.repository.post('/recorded/cleanup', {
+            target: target,
+        });
+    }
+    public async getNextUp(recordedId: apid.RecordedId, isHalfWidth: boolean, option?: NextUpRequestOption): Promise<NextUpResponse | null> {
+        try {
+            return (
+                await this.repository.get(`/recorded/${recordedId}/next-up`, {
+                    params: {
+                        isHalfWidth,
+                        limit: option?.limit,
+                        offset: option?.offset,
+                        target: option?.target,
+                    },
+                })
+            ).data;
+        } catch (error: any) {
+            if (error?.response?.status === 404) return null;
+            throw error;
+        }
+    }
+
+    /**
+     * 外部録画ファイル取り込みディレクトリをスキャンする
+     * @param option: apid.ImportScanOption
+     * @return Promise<apid.ImportScanResult>
+     */
+    public async scanImportDirectory(option: apid.ImportScanOption): Promise<apid.ImportScanResult> {
+        return (await this.repository.post('/recorded/import/scan', option)).data;
+    }
+
+    /**
+     * 外部録画ファイル取り込みジョブを開始する
+     * @param option: apid.ImportRegisterOption
+     * @return Promise<apid.ImportJobStartResult>
+     */
+    public async startImportJob(option: apid.ImportRegisterOption): Promise<apid.ImportJobStartResult> {
+        return (await this.repository.post('/recorded/import', option)).data;
+    }
+
+    /**
+     * 取り込みジョブの進捗を取得する
+     * @param jobId: string
+     * @return Promise<apid.ImportJobStatus | null>
+     */
+    public async getImportJobStatus(jobId: string): Promise<apid.ImportJobStatus | null> {
+        try {
+            return (await this.repository.get(`/recorded/import/status/${jobId}`)).data;
+        } catch (error: any) {
+            if (error?.response?.status === 404) return null;
+            throw error;
+        }
+    }
+
+    /**
+     * 取り込みジョブの失敗ファイルを再実行する
+     * @param jobId: string
+     * @return Promise<apid.ImportJobStartResult | null>
+     */
+    public async retryImportJob(jobId: string): Promise<apid.ImportJobStartResult | null> {
+        try {
+            return (await this.repository.post(`/recorded/import/status/${jobId}/retry`)).data;
+        } catch (error: any) {
+            if (error?.response?.status === 404) return null;
+            throw error;
+        }
     }
 }

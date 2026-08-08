@@ -1,9 +1,11 @@
 import { inject, injectable } from 'inversify';
 import * as apid from '../../../api';
+import IRecordedDB from '../db/IRecordedDB';
 import IConfigFile from '../IConfigFile';
 import IConfiguration from '../IConfiguration';
 import ILogger from '../ILogger';
 import ILoggerModel from '../ILoggerModel';
+import INotificationDispatcher from '../notification/INotificationDispatcher';
 import IIPCServer from '../ipc/IIPCServer';
 import IExternalCommandManageModel from '../operator/externalCommand/IExternalCommandManageModel';
 import IRecordedManageModel from '../operator/recorded/IRecordedManageModel';
@@ -20,6 +22,7 @@ import IRecordingEvent from './IRecordingEvent';
 import IReserveEvent from './IReserveEvent';
 import IRuleEvent from './IRuleEvent';
 import IThumbnailEvent from './IThumbnailEvent';
+import ISeriesResolver from '../series/ISeriesResolver';
 
 @injectable()
 export default class EventSetter implements IEventSetter {
@@ -40,6 +43,9 @@ export default class EventSetter implements IEventSetter {
     private externalCommandManage: IExternalCommandManageModel;
     private ipc: IIPCServer;
     private config: IConfigFile;
+    private notification: INotificationDispatcher;
+    private seriesResolver: ISeriesResolver;
+    private recordedDB: IRecordedDB;
 
     private isFirstreserveationUpdate: boolean = true;
 
@@ -62,6 +68,9 @@ export default class EventSetter implements IEventSetter {
         @inject('IExternalCommandManageModel') externalCommandManage: IExternalCommandManageModel,
         @inject('IIPCServer') ipc: IIPCServer,
         @inject('IConfiguration') configure: IConfiguration,
+        @inject('INotificationDispatcher') notification: INotificationDispatcher,
+        @inject('ISeriesResolver') seriesResolver: ISeriesResolver,
+        @inject('IRecordedDB') recordedDB: IRecordedDB,
     ) {
         this.log = logger.getLogger();
         this.epgUpdateEvent = epgUpdateEvent;
@@ -80,6 +89,9 @@ export default class EventSetter implements IEventSetter {
         this.externalCommandManage = externalCommandManage;
         this.ipc = ipc;
         this.config = configure.getConfig();
+        this.notification = notification;
+        this.seriesResolver = seriesResolver;
+        this.recordedDB = recordedDB;
     }
 
     /**
@@ -87,6 +99,18 @@ export default class EventSetter implements IEventSetter {
      */
     public set(): void {
         // EPG 更新完了イベント
+        // EIT[p/f] 相当の更新を視聴画面・番組表へ即時反映させる
+        this.epgUpdateEvent.setOnAirProgramUpdated(channelIds => {
+            this.ipc.notifyOnAirProgramClient(channelIds);
+
+            // 予約の再スケジュールは epgUpdateIntervalTime 周期の updateAll 任せだと最大でその間隔だけ遅れる。
+            // 放送中 / 直後に始まる番組の時刻変更は録画に直結するため、対象放送局の予約だけ即時に追従させる
+            this.reservationManage.updateOnAirReserves(channelIds).catch(err => {
+                this.log.system.error('update on air reserves error');
+                this.log.system.error(err);
+            });
+        });
+
         this.epgUpdateEvent.setUpdated(async () => {
             await this.recordedManage.historyCleanup().catch(() => {});
 
@@ -171,18 +195,34 @@ export default class EventSetter implements IEventSetter {
 
             this.ipc.notifyClient();
             this.externalCommandManage.addRecordingStartCmd(recorded);
+            void this.notification.dispatch('recording.started', {
+                recordedId: recorded.id,
+                reserveId: reserve.id,
+                name: recorded.name,
+                channelId: recorded.channelId,
+                startAt: recorded.startAt,
+            });
         });
 
         // 録画失敗イベント
-        this.recordingEvent.setRecordingFailed((_reserve, recorded) => {
+        this.recordingEvent.setRecordingFailed((reserve, recorded) => {
             this.ipc.notifyClient();
             if (recorded !== null) {
                 this.externalCommandManage.addRecordingFailedCmd(recorded);
             }
+            void this.notification.dispatch('recording.failed', {
+                reserveId: reserve.id,
+                recordedId: recorded?.id ?? null,
+                name: recorded?.name ?? reserve.name,
+            });
         });
 
-        // 録画リトライオーバーイベント
+        // 録画リトライオーバーイベント (録り逃し検出)
         this.recordingEvent.setRecordingRetryOver(reserve => {
+            void this.notification.dispatch('recording.missed', {
+                reserveId: reserve.id,
+                name: reserve.name,
+            });
             // 予約から削除
             this.reservationManage.cancel(reserve.id).catch(() => {});
         });
@@ -257,8 +297,30 @@ export default class EventSetter implements IEventSetter {
                 });
             }
 
+            // シリーズ自動マッピング
+            void this.seriesResolver
+                .resolve({
+                    recordedId: recorded.id,
+                    title: recorded.name,
+                    channelId: recorded.channelId,
+                    startAt: recorded.startAt,
+                    reserveId: reserve.id,
+                })
+                .catch(err => {
+                    this.log.system.error('series resolve failed');
+                    this.log.system.error(err);
+                });
+
             // コマンド実行
             this.externalCommandManage.addRecordingFinishCmd(recorded);
+            void this.notification.dispatch('recording.completed', {
+                recordedId: recorded.id,
+                reserveId: reserve.id,
+                name: recorded.name,
+                channelId: recorded.channelId,
+                startAt: recorded.startAt,
+                endAt: recorded.endAt,
+            });
 
             this.ipc.notifyClient();
         });
@@ -306,12 +368,17 @@ export default class EventSetter implements IEventSetter {
         });
 
         // upload video file
-        this.recordedEvent.setAddUploadedVideoFile((videoFileId, needsCreateThumbnail) => {
+        this.recordedEvent.setAddUploadedVideoFile((videoFileId, needsCreateThumbnail, recordedId) => {
             this.ipc.notifyClient();
             // サムネイル作成
             if (needsCreateThumbnail === true) {
                 this.thumbnailManage.add(videoFileId);
             }
+
+            // シリーズ自動マッピング
+            // TS 解析 (放送局・番組名・開始時刻の確定) が済んだ後に発行されるイベントなので、
+            // 録画完了時と同じくしょぼいカレンダーの放送予定照会・作品辞書を引ける
+            void this.resolveSeriesForUploadedRecorded(recordedId);
         });
 
         // video file 削除
@@ -353,6 +420,31 @@ export default class EventSetter implements IEventSetter {
         this.encodeEvent.setFinishEncode(info => {
             this.externalCommandManage.addEncodingFinishCmd(info);
         });
+    }
+
+    /**
+     * アップロード / 取り込みで追加された録画をシリーズへ解決する
+     * 録画完了時と違い予約が存在しないため、判定は TS 解析で確定した番組名・放送局・開始時刻だけで行う
+     * @param recordedId: apid.RecordedId
+     * @return Promise<void>
+     */
+    private async resolveSeriesForUploadedRecorded(recordedId: apid.RecordedId): Promise<void> {
+        try {
+            const recorded = await this.recordedDB.findId(recordedId);
+            if (recorded === null) {
+                return;
+            }
+
+            await this.seriesResolver.resolve({
+                recordedId: recorded.id,
+                title: recorded.name,
+                channelId: recorded.channelId,
+                startAt: recorded.startAt,
+            });
+        } catch (err: any) {
+            this.log.system.error('series resolve failed');
+            this.log.system.error(err);
+        }
     }
 
     /**

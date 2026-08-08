@@ -9,9 +9,18 @@ import IConfigFile from '../../../IConfigFile';
 import IConfiguration from '../../../IConfiguration';
 import ILoggerModel from '../../../ILoggerModel';
 import IMirakurunClientModel from '../../../IMirakurunClientModel';
+import BitCollectTransform from '../../../channel/BitCollectTransform';
+import IBroadcastAffiliationCollector from '../../../channel/IBroadcastAffiliationCollector';
 import IEncodeProcessManageModel, { CreateProcessOption } from '../../encode/IEncodeProcessManageModel';
 import ISocketIOManageModel from '../../socketio/ISocketIOManageModel';
+import AribId3Extractor from '../llhls/AribId3Extractor';
+import BroadcastTimeExtractor from '../util/BroadcastTimeExtractor';
+import IBroadcastTimeExtractor from '../util/IBroadcastTimeExtractor';
+import Fmp4Packager from '../llhls/Fmp4Packager';
+import IAribId3Extractor from '../llhls/IAribId3Extractor';
+import IFmp4Packager from '../llhls/IFmp4Packager';
 import IHLSFileDeleterModel from '../util/IHLSFileDeleterModel';
+import IHLSMemoryStoreModel from '../util/IHLSMemoryStoreModel';
 import ILiveStreamBaseModel, { LiveStreamOption } from './ILiveStreamBaseModel';
 import { LiveStreamInfo } from './IStreamBaseModel';
 import StreamBaseModel from './StreamBaseModel';
@@ -25,18 +34,46 @@ export default abstract class LiveStreamBaseModel
     private streamProcess: ChildProcess | null = null;
     private mirakurunClientModel: IMirakurunClientModel;
     private id3MetadataTransoform: ID3MetadataTransform | null = null;
+    private hlsMemoryStore: IHLSMemoryStoreModel;
+    private fmp4Packager: IFmp4Packager | null = null;
+    // in-memory HLS で ARIB 字幕 (ID3 timed metadata) を取り出すための Transform
+    private aribId3Extractor: IAribId3Extractor | null = null;
+    // 配信中の映像の放送時刻 (TDT / TOT) を読み取る。実況コメントの遅延補正に使う
+    private broadcastTimeExtractor: IBroadcastTimeExtractor | null = null;
+    // 配信中の TS から BIT (放送局の系列情報) を収集する
+    private affiliationCollector: IBroadcastAffiliationCollector;
+    private bitCollectTransform: BitCollectTransform | null = null;
+    private memoryStreamId: apid.StreamId | null = null;
 
     constructor(
         @inject('IConfiguration') configure: IConfiguration,
         @inject('ILoggerModel') logger: ILoggerModel,
-        @inject('IEncodeProcessManageModel') processManager: IEncodeProcessManageModel,
+        @inject('IStreamProcessManageModel') processManager: IEncodeProcessManageModel,
         @inject('IHLSFileDeleterModel') fileDeleter: IHLSFileDeleterModel,
         @inject('IMirakurunClientModel') mirakurunClientModel: IMirakurunClientModel,
         @inject('ISocketIOManageModel') socketIO: ISocketIOManageModel,
+        @inject('IHLSMemoryStoreModel') hlsMemoryStore: IHLSMemoryStoreModel,
+        @inject('IBroadcastAffiliationCollector') affiliationCollector: IBroadcastAffiliationCollector,
     ) {
         super(configure, logger, processManager, fileDeleter, socketIO);
 
         this.mirakurunClientModel = mirakurunClientModel;
+        this.hlsMemoryStore = hlsMemoryStore;
+        this.affiliationCollector = affiliationCollector;
+    }
+
+    /**
+     * in-memory HLS (ディスクに書き出さない fMP4 HLS 配信) モードか判定する
+     * cmd が %streamFileDir% を含まない LiveHLS プロファイルは、
+     * fragmented MP4 を標準出力 (pipe:1) へ書き出すコマンドとみなす
+     */
+    private isMemoryHLS(): boolean {
+        return (
+            this.getStreamType() === 'LiveHLS' &&
+            this.processOption !== null &&
+            typeof this.processOption.cmd !== 'undefined' &&
+            this.processOption.cmd.includes('%streamFileDir%') === false
+        );
     }
 
     /**
@@ -56,7 +93,9 @@ export default abstract class LiveStreamBaseModel
             return null;
         }
 
-        let cmd = this.processOption.cmd.replace(/%FFMPEG%/g, this.config.ffmpeg);
+        let cmd = this.processOption.cmd
+            .replace(/%FFMPEG%/g, this.config.ffmpeg)
+            .replace(/%TSREADEX%/g, typeof this.config.tsreadex === 'undefined' ? 'tsreadex' : this.config.tsreadex);
         if (this.getStreamType() === 'LiveHLS') {
             cmd = cmd
                 .replace(/%streamFileDir%/g, this.config.streamFilePath)
@@ -65,7 +104,10 @@ export default abstract class LiveStreamBaseModel
 
         return {
             input: null,
-            output: this.getStreamType() === 'LiveHLS' ? `${this.config.streamFilePath}\/stream${streamId}.m3u8` : null,
+            output:
+                this.getStreamType() === 'LiveHLS' && this.isMemoryHLS() === false
+                    ? `${this.config.streamFilePath}\/stream${streamId}.m3u8`
+                    : null,
             cmd: cmd,
             priority: LiveStreamBaseModel.ENCODE_PROCESS_PRIORITY,
         };
@@ -81,8 +123,8 @@ export default abstract class LiveStreamBaseModel
             throw new Error('ProcessOptionIsNull');
         }
 
-        // HLS stream ディレクトリ使用準備
-        if (this.getStreamType() === 'LiveHLS') {
+        // HLS stream ディレクトリ使用準備 (in-memory モードではディスクを一切使わない)
+        if (this.getStreamType() === 'LiveHLS' && this.isMemoryHLS() === false) {
             await this.prepStreamDir(streamId);
         }
 
@@ -124,14 +166,31 @@ export default abstract class LiveStreamBaseModel
 
             // パイプ処理
             if (this.streamProcess.stdin !== null) {
-                // HLS 配信の場合は arib-subtitle-timedmetadater を通す
-                if (this.getStreamType() === 'LiveHLS') {
-                    this.log.stream.info('use arib-subtitle-timedmetadater');
-                    this.id3MetadataTransoform = new ID3MetadataTransform();
-                    this.stream.pipe(this.id3MetadataTransoform);
-                    this.id3MetadataTransoform.pipe(this.streamProcess.stdin);
+                // 実況コメントの遅延補正のため、エンコード前の TS から放送時刻 (TDT / TOT) を読む
+                this.broadcastTimeExtractor = new BroadcastTimeExtractor(this.log);
+                this.stream.pipe(this.broadcastTimeExtractor);
+
+                // 放送局の系列情報 (BIT) を配信のついでに収集する
+                this.bitCollectTransform = new BitCollectTransform(this.affiliationCollector, this.log);
+                this.broadcastTimeExtractor.pipe(this.bitCollectTransform);
+                const tsSource = this.bitCollectTransform;
+
+                // ARIB 字幕を ID3 timed metadata へ変換する (arib-subtitle-timedmetadater)。
+                // HLS だけでなく mpegts 配信 (m2ts / m2tsll) でも必要:
+                // DPlayer は mpegts.js の TIMED_ID3_METADATA_ARRIVED からしか aribb24 へ字幕を渡さないため、
+                // ARIB 字幕 ES をそのまま流しても字幕は表示されない
+                this.log.stream.info('use arib-subtitle-timedmetadater');
+                this.id3MetadataTransoform = new ID3MetadataTransform();
+                tsSource.pipe(this.id3MetadataTransoform);
+
+                if (this.getStreamType() === 'LiveHLS' && this.isMemoryHLS() === true) {
+                    // in-memory (fMP4) モードでは mp4 出力に ID3 timed metadata を乗せられないため、
+                    // エンコード前の TS から ID3 を抜き取り、セグメントの emsg box として再多重化する
+                    this.aribId3Extractor = new AribId3Extractor(this.log);
+                    this.id3MetadataTransoform.pipe(this.aribId3Extractor);
+                    this.aribId3Extractor.pipe(this.streamProcess.stdin);
                 } else {
-                    this.stream.pipe(this.streamProcess.stdin);
+                    this.id3MetadataTransoform.pipe(this.streamProcess.stdin);
                 }
             } else {
                 await this.stop();
@@ -140,8 +199,13 @@ export default abstract class LiveStreamBaseModel
             }
 
             if (this.getStreamType() === 'LiveHLS') {
-                // stream 有効チェク開始
-                this.startCheckStreamEnable(streamId);
+                if (this.isMemoryHLS() === true) {
+                    // エンコードプロセスの fMP4 出力をメモリ上で HLS セグメント化する
+                    this.startMemoryHLSPackaging(streamId);
+                } else {
+                    // stream 有効チェク開始
+                    this.startCheckStreamEnable(streamId);
+                }
             }
 
             // プロセスが即時終了していた場合
@@ -164,6 +228,48 @@ export default abstract class LiveStreamBaseModel
 
         // stream 停止タイマーセット
         this.setStopTimer();
+    }
+
+    /**
+     * in-memory HLS のパッケージングを開始する
+     * エンコードプロセスが標準出力へ書き出す fragmented MP4 を Fmp4Packager で
+     * init / セグメントに分解し、HLSMemoryStoreModel へ蓄積する (ディスク書き込みなし)
+     * @param streamId: apid.StreamId
+     */
+    private startMemoryHLSPackaging(streamId: apid.StreamId): void {
+        if (this.streamProcess === null || this.streamProcess.stdout === null) {
+            throw new Error('StreamProcessStdoutIsNull');
+        }
+
+        this.log.stream.info(`start in-memory HLS packaging: ${streamId}`);
+        this.memoryStreamId = streamId;
+        this.hlsMemoryStore.create(streamId);
+
+        const packager = new Fmp4Packager({ partsPerSegment: 1 }, this.log);
+        this.fmp4Packager = packager;
+
+        packager.on('init', data => {
+            this.hlsMemoryStore.setInit(streamId, data);
+        });
+        packager.on('segment', segment => {
+            this.hlsMemoryStore.addSegment(streamId, segment.data, segment.duration);
+            if (this.isEnable() === false && this.hlsMemoryStore.isReady(streamId) === true) {
+                this.markEnable(streamId);
+            }
+        });
+        packager.on('halted', message => {
+            this.log.stream.error(`in-memory HLS packaging halted: ${streamId} ${message}`);
+            this.emitExitStream();
+        });
+
+        // エンコード前の TS から抜き取った ID3 timed metadata (ARIB 字幕) をセグメントへ乗せる
+        if (this.aribId3Extractor !== null) {
+            this.aribId3Extractor.on('id3', metadata => {
+                packager.pushId3(metadata);
+            });
+        }
+
+        this.streamProcess.stdout.pipe(packager);
     }
 
     /**
@@ -203,9 +309,31 @@ export default abstract class LiveStreamBaseModel
             this.stream.destroy();
         }
 
+        if (this.aribId3Extractor !== null) {
+            this.aribId3Extractor.unpipe();
+            this.aribId3Extractor.removeAllListeners();
+            this.aribId3Extractor.destroy();
+            this.aribId3Extractor = null;
+        }
+
         if (this.id3MetadataTransoform !== null) {
             this.id3MetadataTransoform.unpipe();
             this.id3MetadataTransoform.destroy();
+            this.id3MetadataTransoform = null;
+        }
+
+        if (this.bitCollectTransform !== null) {
+            this.bitCollectTransform.unpipe();
+            this.bitCollectTransform.destroy();
+            this.bitCollectTransform = null;
+        }
+
+        if (this.fmp4Packager !== null) {
+            if (this.streamProcess !== null && this.streamProcess.stdout !== null) {
+                this.streamProcess.stdout.unpipe();
+            }
+            this.fmp4Packager.destroy();
+            this.fmp4Packager = null;
         }
 
         if (this.streamProcess !== null) {
@@ -213,7 +341,14 @@ export default abstract class LiveStreamBaseModel
         }
 
         if (this.getStreamType() === 'LiveHLS') {
-            await this.fileDeleter.deleteAllFiles();
+            if (this.isMemoryHLS() === true) {
+                if (this.memoryStreamId !== null) {
+                    this.hlsMemoryStore.delete(this.memoryStreamId);
+                    this.memoryStreamId = null;
+                }
+            } else {
+                await this.fileDeleter.deleteAllFiles();
+            }
         }
     }
 
@@ -244,12 +379,19 @@ export default abstract class LiveStreamBaseModel
             throw new Error('ConfigModeIsNull');
         }
 
-        return {
+        const info: LiveStreamInfo = {
             type: this.getStreamType(),
             mode: this.configMode,
             channelId: this.processOption.channelId,
             isEnable: this.isEnable(),
         };
+
+        const broadcastTime = this.broadcastTimeExtractor?.getBroadcastTime() ?? null;
+        if (broadcastTime !== null) {
+            info.broadcastTime = broadcastTime;
+        }
+
+        return info;
     }
 
     protected abstract getStreamType(): 'LiveStream' | 'LiveHLS';

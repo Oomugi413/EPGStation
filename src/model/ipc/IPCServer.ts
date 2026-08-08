@@ -1,21 +1,28 @@
 import { ChildProcess } from 'child_process';
 import { inject, injectable } from 'inversify';
 import * as apid from '../../../api';
+import IAppSettingChangeEvent from '../event/IAppSettingChangeEvent';
 import IOperatorEncodeEvent, { OperatorFinishEncodeInfo } from '../event/IOperatorEncodeEvent';
+import IImportJobManageModel, { ImportJobId } from '../operator/recorded/IImportJobManageModel';
 import IRecordedManageModel, {
     AddVideoFileOption,
+    ImportedExternalRecordedFileOption,
     UploadedVideoFileOption,
 } from '../operator/recorded/IRecordedManageModel';
 import IRecordedTagManadeModel from '../operator/recordedTag/IRecordedTagManadeModel';
 import IRecordingManageModel from '../operator/recording/IRecordingManageModel';
 import IReservationManageModel from '../operator/reservation/IReservationManageModel';
 import IRuleManageModel from '../operator/rule/IRuleManageModel';
+import ISeriesBackfillManageModel, { SeriesBackfillOption } from '../operator/series/ISeriesBackfillManageModel';
 import IThumbnailManageModel from '../operator/thumbnail/IThumbnailManageModel';
+import IUpdateManageModel from '../update/IUpdateManageModel';
 import IIPCServer from './IIPCServer';
 import {
+    AppSettingFunctions,
     OperatorEncodeEventFunctions,
     ModelName,
     NotifyClientMessage,
+    NotifyOnAirProgramMessage,
     PushEncodeMessage,
     RecordedFunctions,
     RecordedTagFunctions,
@@ -24,7 +31,9 @@ import {
     ReserveationFunctions,
     RuleFuntions,
     SendMessage,
+    SeriesFunctions,
     ThumbnailFunctions,
+    UpdateFunctions,
 } from './IPCMessageDefine';
 
 interface IFunctionIndex {
@@ -35,11 +44,15 @@ interface IFunctionIndex {
 export default class IPCServer implements IIPCServer {
     private reservationManage: IReservationManageModel;
     private recordedManage: IRecordedManageModel;
+    private importJobManage: IImportJobManageModel;
     private recordedTagManage: IRecordedTagManadeModel;
     private recordingManage: IRecordingManageModel;
     private ruleManage: IRuleManageModel;
     private thumbnailManage: IThumbnailManageModel;
     private encodeEvent: IOperatorEncodeEvent;
+    private seriesBackfillManage: ISeriesBackfillManageModel;
+    private appSettingChangeEvent: IAppSettingChangeEvent;
+    private updateManage: IUpdateManageModel;
     private child: ChildProcess | null = null;
     private functions: {
         [modelName: string]: IFunctionIndex;
@@ -49,19 +62,27 @@ export default class IPCServer implements IIPCServer {
         @inject('IReservationManageModel')
         reservationManage: IReservationManageModel,
         @inject('IRecordedManageModel') recordedManage: IRecordedManageModel,
+        @inject('IImportJobManageModel') importJobManage: IImportJobManageModel,
         @inject('IRecordedTagManadeModel') recordedTagManage: IRecordedTagManadeModel,
         @inject('IRecordingManageModel') recordingManage: IRecordingManageModel,
         @inject('IRuleManageModel') ruleManage: IRuleManageModel,
         @inject('IThumbnailManageModel') thumbnailManage: IThumbnailManageModel,
         @inject('IOperatorEncodeEvent') encodeEvent: IOperatorEncodeEvent,
+        @inject('ISeriesBackfillManageModel') seriesBackfillManage: ISeriesBackfillManageModel,
+        @inject('IAppSettingChangeEvent') appSettingChangeEvent: IAppSettingChangeEvent,
+        @inject('IUpdateManageModel') updateManage: IUpdateManageModel,
     ) {
         this.reservationManage = reservationManage;
         this.recordedManage = recordedManage;
+        this.importJobManage = importJobManage;
         this.recordedTagManage = recordedTagManage;
         this.recordingManage = recordingManage;
         this.ruleManage = ruleManage;
         this.thumbnailManage = thumbnailManage;
         this.encodeEvent = encodeEvent;
+        this.seriesBackfillManage = seriesBackfillManage;
+        this.appSettingChangeEvent = appSettingChangeEvent;
+        this.updateManage = updateManage;
 
         this.init();
     }
@@ -110,6 +131,21 @@ export default class IPCServer implements IIPCServer {
     }
 
     /**
+     * EIT[p/f] 相当の更新をクライアントへ通知する
+     * @param channelIds: number[] 対象の放送局
+     */
+    public notifyOnAirProgramClient(channelIds: number[]): void {
+        if (this.child === null) {
+            return;
+        }
+
+        this.child.send(<any>(<NotifyOnAirProgramMessage>{
+            type: 'notifyOnAirProgram',
+            value: { channelIds },
+        }));
+    }
+
+    /**
      * クライアントへエンコードを依頼する
      * @param addOption: apid.AddEncodeProgramOption
      */
@@ -147,6 +183,53 @@ export default class IPCServer implements IIPCServer {
         this.functions[ModelName.rule] = this.getRuleFunctions();
         this.functions[ModelName.thumbnail] = this.getThumbnailFunctions();
         this.functions[ModelName.encodeEvent] = this.getOperatorEncodeEventFunctions();
+        this.functions[ModelName.series] = this.getSeriesFunctions();
+        this.functions[ModelName.appSetting] = this.getAppSettingFunctions();
+        this.functions[ModelName.update] = this.getUpdateFunctions();
+    }
+
+    /**
+     * set update functions
+     * 更新は git 操作・ビルド・プロセス再起動を伴うため Operator (親) 側で実行する
+     */
+    private getUpdateFunctions(): IFunctionIndex {
+        const index: IFunctionIndex = {};
+
+        index[UpdateFunctions.getStatus] = async () => {
+            return await this.updateManage.getStatus();
+        };
+        index[UpdateFunctions.check] = async () => {
+            return await this.updateManage.check();
+        };
+        index[UpdateFunctions.run] = async msg => {
+            const option = this.getArgsValue<any>(msg, 'option');
+            return await this.updateManage.run(option ?? {});
+        };
+        index[UpdateFunctions.getJob] = async () => {
+            return this.updateManage.getJob();
+        };
+        index[UpdateFunctions.restart] = async () => {
+            return this.updateManage.restartApplication();
+        };
+
+        return index;
+    }
+
+    /**
+     * set app setting (hot reload) functions
+     */
+    private getAppSettingFunctions(): IFunctionIndex {
+        const index: IFunctionIndex = {};
+
+        // notifyChanged: システム設定が更新されたことを Operator 側へ伝える。
+        // 対象モジュールは DB を都度読み直す実装のため、ここでは録画中の処理に影響しない
+        // イベント発行のみを行う (fire-and-forget)
+        index[AppSettingFunctions.notifyChanged] = async msg => {
+            const keys = this.getArgsValue<string[]>(msg, 'keys');
+            this.appSettingChangeEvent.emitChanged(keys);
+        };
+
+        return index;
     }
 
     /**
@@ -249,7 +332,7 @@ export default class IPCServer implements IIPCServer {
         index[RecordedFunctions.addUploadedVideoFile] = async msg => {
             const option = this.getArgsValue<UploadedVideoFileOption>(msg, 'option');
 
-            await this.recordedManage.addUploadedVideoFile(option);
+            return await this.recordedManage.addUploadedVideoFile(option);
         };
 
         // createNewRecorded
@@ -274,6 +357,11 @@ export default class IPCServer implements IIPCServer {
             await this.recordedManage.changeProtect(recordedId, isProtect);
         };
 
+        // getCleanupInfo
+        index[RecordedFunctions.getCleanupInfo] = async () => {
+            return await this.recordedManage.getCleanupInfo();
+        };
+
         // videoFileCleanup
         index[RecordedFunctions.videoFileCleanup] = async () => {
             await this.recordedManage.videoFileCleanup();
@@ -282,6 +370,27 @@ export default class IPCServer implements IIPCServer {
         // dropLogFileCleanup
         index[RecordedFunctions.dropLogFileCleanup] = async () => {
             await this.recordedManage.dropLogFileCleanup();
+        };
+
+        // startImportJob
+        index[RecordedFunctions.startImportJob] = async msg => {
+            const items = this.getArgsValue<ImportedExternalRecordedFileOption[]>(msg, 'items');
+
+            return this.importJobManage.start(items);
+        };
+
+        // getImportJobStatus
+        index[RecordedFunctions.getImportJobStatus] = async msg => {
+            const jobId = this.getArgsValue<ImportJobId>(msg, 'jobId');
+
+            return this.importJobManage.getStatus(jobId);
+        };
+
+        // retryImportJob
+        index[RecordedFunctions.retryImportJob] = async msg => {
+            const jobId = this.getArgsValue<ImportJobId>(msg, 'jobId');
+
+            return this.importJobManage.retryFailed(jobId);
         };
 
         return index;
@@ -296,16 +405,18 @@ export default class IPCServer implements IIPCServer {
         index[RecordedTagFunctions.create] = async msg => {
             const name = this.getArgsValue<string>(msg, 'name');
             const color = this.getArgsValue<string>(msg, 'color');
+            const parentId = msg.args?.parentId as number | null | undefined;
 
-            return await this.recordedTagManage.create(name, color);
+            return await this.recordedTagManage.create(name, color, parentId);
         };
 
         index[RecordedTagFunctions.update] = async msg => {
             const tagId = this.getArgsValue<apid.RecordedTagId>(msg, 'tagId');
             const name = this.getArgsValue<string>(msg, 'name');
             const color = this.getArgsValue<string>(msg, 'color');
+            const parentId = msg.args?.parentId as number | null | undefined;
 
-            await this.recordedTagManage.update(tagId, name, color);
+            await this.recordedTagManage.update(tagId, name, color, parentId);
         };
 
         index[RecordedTagFunctions.setRelation] = async msg => {
@@ -440,6 +551,39 @@ export default class IPCServer implements IIPCServer {
             const info = this.getArgsValue<OperatorFinishEncodeInfo>(msg, 'info');
 
             this.encodeEvent.emitFinishEncode(info);
+        };
+
+        return index;
+    }
+
+    /**
+     * set series (backfill) functions
+     */
+    private getSeriesFunctions(): IFunctionIndex {
+        const index: IFunctionIndex = {};
+
+        // startBackfill
+        index[SeriesFunctions.startBackfill] = async msg => {
+            const option = this.getArgsValue<SeriesBackfillOption>(msg, 'option');
+
+            return await this.seriesBackfillManage.start(option);
+        };
+
+        // getBackfillStatus
+        index[SeriesFunctions.getBackfillStatus] = async () => {
+            return await this.seriesBackfillManage.getStatus();
+        };
+
+        // cancelBackfill
+        index[SeriesFunctions.cancelBackfill] = async () => {
+            await this.seriesBackfillManage.cancel();
+        };
+
+        // analyze (録画 1 件のシリーズ判定 + トレース)
+        index[SeriesFunctions.analyze] = async msg => {
+            const recordedId = this.getArgsValue<apid.RecordedId>(msg, 'recordedId');
+
+            return await this.seriesBackfillManage.analyze(recordedId);
         };
 
         return index;

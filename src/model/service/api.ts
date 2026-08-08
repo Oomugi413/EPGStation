@@ -3,6 +3,80 @@ import * as fs from 'fs';
 import * as path from 'path';
 import IPlayList from '../api/IPlayList';
 
+/**
+ * セッション Cookie の Path。subDirectory 運用時にその配下だけへ送るようにする
+ * @param configuration: IConfiguration
+ * @return string
+ */
+export const getCookiePath = (configuration: { getConfig(): { subDirectory?: string } }): string => {
+    const sub = configuration.getConfig().subDirectory;
+    if (typeof sub !== 'string' || sub === '') return '/';
+    return sub.startsWith('/') ? sub : `/${sub}`;
+};
+
+export const getErrorMessage = (error: unknown): string => {
+    return error instanceof Error ? error.message : String(error);
+};
+
+export const parseRequestParamInt = (value: string | string[], name: string): number => {
+    if (Array.isArray(value)) {
+        throw new Error(`Invalid route parameter: ${name}`);
+    }
+
+    if (!/^-?\d+$/.test(value)) {
+        throw new Error(`Invalid route parameter: ${name}`);
+    }
+
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isSafeInteger(parsed)) {
+        throw new Error(`Route parameter is outside the safe integer range: ${name}`);
+    }
+
+    return parsed;
+};
+
+export interface StreamModeOrProfile {
+    mode?: number;
+    profile?: string;
+}
+
+/**
+ * ストリーミング系 API の `mode` (旧形式 index) / `profile` (新形式 id) クエリパラメータを解決する
+ * どちらも未指定の場合は 400 応答を返し null を返す
+ * @param req: express.Request
+ * @param res: express.Response
+ * @return StreamModeOrProfile | null
+ */
+export const parseStreamModeOrProfile = (req: express.Request, res: express.Response): StreamModeOrProfile | null => {
+    const rawProfile = req.query.profile;
+    const profile = typeof rawProfile === 'string' && rawProfile.length > 0 ? rawProfile : undefined;
+
+    // express-openapi は apiDoc の parameter schema (integer) に基づいてクエリを型変換 (coercion) するため、
+    // 通常 req.query.mode は number として渡ってくる (ServiceServer.initOpenApi の Express 5 対策参照)。
+    // coercion を経ないリクエストに備えて string も受け付ける。
+    const rawMode = req.query.mode;
+    let mode: number | undefined;
+    if (typeof rawMode === 'number') {
+        mode = rawMode;
+    } else if (typeof rawMode === 'string' && rawMode.length > 0) {
+        mode = parseInt(rawMode, 10);
+    }
+
+    if (typeof profile === 'undefined' && (typeof mode === 'undefined' || Number.isNaN(mode))) {
+        responseError(res, {
+            code: 400,
+            message: 'mode or profile is required',
+        });
+
+        return null;
+    }
+
+    return {
+        mode: typeof mode === 'number' && !Number.isNaN(mode) ? mode : undefined,
+        profile: profile,
+    };
+};
+
 export interface IError {
     readonly code: number;
     readonly message: string;
@@ -37,8 +111,27 @@ export const responseServerError = (res: express.Response, err?: string): expres
     return res;
 };
 
-// eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
-export const responseJSON = (res: express.Response, code: number, body?: any): express.Response => {
+/**
+ * ストリーム開始系 API のエラー応答を行う
+ * エンコードプロセスの枠不足 ('EncodeProcessManageModelCreateError') が原因の場合は
+ * 503 Service Unavailable として同時配信数の上限に達している旨を返す。
+ * それ以外の予期しないエラーは従来通り 500 Internal Server Error として返す。
+ * @param res: express.Response
+ * @param err: unknown
+ * @return express.Response
+ */
+export const responseStreamStartError = (res: express.Response, err: unknown): express.Response => {
+    if (err instanceof Error && err.message === 'EncodeProcessManageModelCreateError') {
+        return responseError(res, {
+            code: 503,
+            message: '同時配信数の上限に達しています',
+        });
+    }
+
+    return responseServerError(res, getErrorMessage(err));
+};
+
+export const responseJSON = (res: express.Response, code: number, body?: unknown): express.Response => {
     res.status(code);
     // non-cache
     res.header('Cache-Control', 'private, no-cache, no-store, must-revalidate');
@@ -73,7 +166,7 @@ export const responseFile = (
         throw new Error('file path is derectory');
     }
 
-    const responseHeaders: any = {};
+    const responseHeaders: Record<string, string | number> = {};
     if (download) {
         responseHeaders['Content-Type'] = 'application/octet-stream';
         responseHeaders['Content-disposition'] = `attachment; filename*=utf-8'ja'${encodeURIComponent(
@@ -145,8 +238,7 @@ const sendResponse = (
     code: number,
     req: express.Request,
     res: express.Response,
-    // eslint-disable-next-line @typescript-eslint/ban-types
-    responseHeaders: {},
+    responseHeaders: Record<string, string | number>,
     readable: fs.ReadStream | null,
 ): void => {
     res.status(code);
