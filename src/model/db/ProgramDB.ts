@@ -4,6 +4,8 @@ import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity
 import * as apid from '../../../api';
 import * as mapid from '../../../node_modules/mirakurun/api';
 import Program from '../../db/entities/Program';
+import Recorded from '../../db/entities/Recorded';
+import RecordedHistory from '../../db/entities/RecordedHistory';
 import DateUtil from '../../util/DateUtil';
 import StrUtil from '../../util/StrUtil';
 import IConfigFile from '../IConfigFile';
@@ -11,6 +13,7 @@ import IConfiguration from '../IConfiguration';
 import ILogger from '../ILogger';
 import ILoggerModel from '../ILoggerModel';
 import IPromiseRetry from '../IPromiseRetry';
+import RecordingDuplicatePolicy, { DuplicateHistory } from '../operator/RecordingDuplicatePolicy';
 import DBUtil from './DBUtil';
 import IChannelTypeIndex from './IChannelTypeHash';
 import IDBOperator from './IDBOperator';
@@ -453,14 +456,9 @@ export default class ProgramDB implements IProgramDB {
             throw new Error('InvalidFindRuleOption');
         }
 
-        let select = await connection.createQueryBuilder().select('program');
-        if (typeof option.reserveOption !== 'undefined' && option.reserveOption.avoidDuplicate === true) {
-            select = select.addSelect(
-                this.createOverlapQueryStr(option.reserveOption.periodToAvoidDuplicate),
-                'overlap',
-            );
-        }
-        const queryBuilder = select
+        const queryBuilder = connection
+            .createQueryBuilder()
+            .select('program')
             .from(Program, 'program')
             .where(str, query.param)
             .andWhere(`${new Date().getTime()} <= program.endAt`)
@@ -468,15 +466,18 @@ export default class ProgramDB implements IProgramDB {
             .limit(option.limit);
 
         const result = await this.promieRetry.run(() => {
-            return queryBuilder.getRawAndEntities();
+            return queryBuilder.getMany();
         });
 
-        // overlap を追加
-        return result.entities.map((entity, i) => {
-            // eslint-disable-next-line no-extra-boolean-cast
-            (<any>entity).overlap = Boolean(!!result.raw[i].overlap);
-
-            return <any>entity;
+        const histories =
+            option.reserveOption?.avoidDuplicate === true
+                ? await this.findDuplicateHistories(result)
+                : new Map<number, DuplicateHistory[]>();
+        return result.map(program => {
+            const overlap = (histories.get(program.channelId) ?? []).some(history =>
+                RecordingDuplicatePolicy.isDuplicate(program, history, option.reserveOption?.periodToAvoidDuplicate),
+            );
+            return Object.assign(program, { overlap });
         });
     }
 
@@ -974,32 +975,62 @@ export default class ProgramDB implements IProgramDB {
     }
 
     /**
-     * overlap 用 query 文字列を生成
-     * @param periodToAvoidDuplicate: 重複検索日数
+     * Load existing history with episode metadata from retained recordings, without a schema change.
+     * A title-only history remains usable only if the title itself identifies the episode.
      */
-    private createOverlapQueryStr(periodToAvoidDuplicate: number | undefined): string {
-        const period =
-            typeof periodToAvoidDuplicate !== 'undefined' && periodToAvoidDuplicate > 0
-                ? periodToAvoidDuplicate * 24 * 60 * 60 * 1000
-                : 0;
-        const now = new Date().getTime();
-        let str =
-            'case when id in ' +
-            '(' +
-            'select P.id from program as P, recorded_history as R ' +
-            'where P.shortName = R.name ' +
-            'and P.channelId = R.channelId ';
-
-        // 重複検索日数
-        if (period > 0) {
-            str += `and R.endAt >= ${now - period} and R.endAt <= ${now} and P.endAt <= (R.endAt + ${period}) `;
-        } else {
-            str += `and R.endAt <= ${now} `;
+    private async findDuplicateHistories(programs: Program[]): Promise<Map<number, DuplicateHistory[]>> {
+        const channels = [
+            ...new Set(
+                programs
+                    .filter(program => RecordingDuplicatePolicy.canCheck(program))
+                    .map(program => program.channelId),
+            ),
+        ];
+        const histories = new Map<number, DuplicateHistory[]>();
+        if (channels.length === 0) {
+            return histories;
         }
-
-        str += ') then 1 else 0 end';
-
-        return str;
+        const connection = await this.op.getConnection();
+        const now = Date.now();
+        const query = connection
+            .createQueryBuilder()
+            .select('history.name', 'historyName')
+            .addSelect('history.channelId', 'channelId')
+            .addSelect('history.endAt', 'endAt')
+            .addSelect('recorded.name', 'recordedName')
+            .addSelect('recorded.description', 'description')
+            .from(RecordedHistory, 'history')
+            .leftJoin(Recorded, 'recorded', 'recorded.channelId = history.channelId AND recorded.endAt = history.endAt')
+            .where('history.channelId IN (:...channels)', { channels })
+            .andWhere('history.endAt <= :now', { now });
+        const rows = await this.promieRetry.run(() =>
+            query.getRawMany<{
+                historyName: string;
+                channelId: number | string;
+                endAt: number | string;
+                recordedName: string | null;
+                description: string | null;
+            }>(),
+        );
+        for (const row of rows) {
+            if (
+                row.recordedName !== null &&
+                StrUtil.deleteBrackets(StrUtil.toHalf(row.recordedName)) !== row.historyName
+            ) {
+                continue;
+            }
+            const channelId = Number(row.channelId);
+            const history: DuplicateHistory = {
+                name: row.recordedName ?? row.historyName,
+                description: row.description,
+                channelId,
+                endAt: Number(row.endAt),
+            };
+            const items = histories.get(channelId) ?? [];
+            items.push(history);
+            histories.set(channelId, items);
+        }
+        return histories;
     }
 
     /**
