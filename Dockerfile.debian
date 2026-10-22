@@ -1,6 +1,6 @@
 # クライアントはプラットフォーム依存のコードを含まないため、BUILDPLATFORMでビルドした結果を
 # 全てのTARGETPLATFORMで再利用できる。これによりビルド時間を短縮できる。
-FROM --platform=$BUILDPLATFORM node:18-bookworm AS client-builder
+FROM --platform=$BUILDPLATFORM node:24-bookworm AS client-builder
 COPY client/package*.json /app/client/
 WORKDIR /app/client
 RUN npm config set fetch-retries 10 \
